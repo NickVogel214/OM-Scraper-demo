@@ -206,8 +206,7 @@ def crexi_avgs_from_filtered(df: pd.DataFrame) -> Dict[str, Optional[float]]:
 def synthetic_realtor_rent_comps(base_realtor: Dict[str, Any], n=400, seed=11) -> pd.DataFrame:
     """
     Build a comps dataframe with per-unit-type rent observations and distances.
-    Columns: unit_type, rent, distance_miles
-    Also synthesize a per-record avg_sqft_per_unit to allow filtered averaging of that too.
+    Columns: unit_type, rent, distance_miles, avg_sqft_per_unit
     """
     rng = np.random.default_rng(seed)
     rows = []
@@ -223,7 +222,6 @@ def synthetic_realtor_rent_comps(base_realtor: Dict[str, Any], n=400, seed=11) -
         base = base_realtor.get(RENT_META[k]["rent_key"])
         if not isinstance(base, (int, float)):
             continue
-        # create n/4 obs per unit type
         m = max(50, n // 4)
         rents = base + rng.normal(0, sigma[k], m)
         dists = rng.uniform(0, dist_max, m)
@@ -259,7 +257,7 @@ def realtor_avgs_from_filtered(df: pd.DataFrame) -> Dict[str, Optional[float]]:
     return out
 
 # ======================
-# Rent table + totals (weighted by unit count)
+# Rent table + totals (weighted by unit count; uses Realtor FILTERED averages)
 # ======================
 def build_rent_df(om: Dict[str, Any], realtor_avgs: Dict[str, Any]) -> pd.DataFrame:
     rows = []
@@ -370,7 +368,6 @@ def style_rent_df(df: pd.DataFrame, totals: Dict[str, Any]) -> "pd.io.formats.st
                 _, dev = df.iloc[i]["Avg Rent"]
                 styles.append(f"background-color: {dev_color(dev)};")
             else:
-                # color the totals row by its deviation too
                 styles.append(f"background-color: {dev_color(totals['dev_vs_avg_total'])};")
         return styles
 
@@ -456,7 +453,8 @@ def build_all_metrics_table(om: Dict[str, Any], crexi_avg: Dict[str, Any], realt
     add("Lot Size (acres)", om.get("lot_size"), om_only=True, fmt=lambda v: float(v))
 
     # Shared rows (use filtered averages)
-    add("Rentable Sq Ft", om.get("rentable_sqft"), crexi_avg.get("SqFt"), None, fmt=lambda v: int(round(v)) if isinstance(v,(int,float)) else v)
+    add("Rentable Sq Ft", om.get("rentable_sqft"), crexi_avg.get("SqFt"), None,
+        fmt=lambda v: int(round(v)) if isinstance(v,(int,float)) else v)
     cx_avg_sqft_unit = (crexi_avg.get("SqFt") / om.get("total_units")
                         if isinstance(crexi_avg.get("SqFt"), (int,float)) and isinstance(om.get("total_units"), (int,float)) and om.get("total_units") != 0
                         else None)
@@ -487,6 +485,105 @@ def build_all_metrics_table(om: Dict[str, Any], crexi_avg: Dict[str, Any], realt
     rows.append(["Price/Acre", fmt_money(om_ppa) if om_ppa else None, fmt_money(cx_ppa) if cx_ppa else None, None])
 
     return pd.DataFrame(rows, columns=["Metric","OM","Crexi (Filtered Avg)","Realtor (Filtered Avg)"])
+
+# ======================
+# Detailed stats builders (Realtor & Crexi)
+# ======================
+def build_realtor_stats_table(comps_realtor: pd.DataFrame) -> pd.DataFrame:
+    if comps_realtor.empty:
+        return pd.DataFrame(columns=[
+            "Unit Type","Count","Rent (Mean)","Rent (Std)","Rent (Min)","Rent (Max)",
+            "Avg SqFt/Unit (Mean)","Avg SqFt/Unit (Std)","Distance mi (Mean)","Distance mi (Std)"
+        ])
+    grp = comps_realtor.groupby("unit_type", dropna=False)
+    stats = pd.DataFrame({
+        "Count": grp["rent"].count(),
+        "Rent (Mean)": grp["rent"].mean(),
+        "Rent (Std)": grp["rent"].std(ddof=1),
+        "Rent (Min)": grp["rent"].min(),
+        "Rent (Max)": grp["rent"].max(),
+        "Avg SqFt/Unit (Mean)": grp["avg_sqft_per_unit"].mean(),
+        "Avg SqFt/Unit (Std)": grp["avg_sqft_per_unit"].std(ddof=1),
+        "Distance mi (Mean)": grp["distance_miles"].mean(),
+        "Distance mi (Std)": grp["distance_miles"].std(ddof=1),
+    }).reset_index().rename(columns={"unit_type": "Unit Type"})
+
+    # overall row
+    overall = pd.DataFrame([{
+        "Unit Type": "All Types",
+        "Count": len(comps_realtor),
+        "Rent (Mean)": comps_realtor["rent"].mean(),
+        "Rent (Std)": comps_realtor["rent"].std(ddof=1),
+        "Rent (Min)": comps_realtor["rent"].min(),
+        "Rent (Max)": comps_realtor["rent"].max(),
+        "Avg SqFt/Unit (Mean)": comps_realtor["avg_sqft_per_unit"].mean(),
+        "Avg SqFt/Unit (Std)": comps_realtor["avg_sqft_per_unit"].std(ddof=1),
+        "Distance mi (Mean)": comps_realtor["distance_miles"].mean(),
+        "Distance mi (Std)": comps_realtor["distance_miles"].std(ddof=1),
+    }])
+    stats = pd.concat([stats, overall], ignore_index=True)
+
+    # format
+    def _fmt_row(row):
+        for c in ["Rent (Mean)","Rent (Std)","Rent (Min)","Rent (Max)"]:
+            if pd.notnull(row[c]): row[c] = fmt_money(row[c])
+        if pd.notnull(row["Count"]): row["Count"] = f"{int(round(row['Count']))}"
+        for c in ["Avg SqFt/Unit (Mean)","Avg SqFt/Unit (Std)"]:
+            if pd.notnull(row[c]): row[c] = f"{row[c]:.1f}"
+        for c in ["Distance mi (Mean)","Distance mi (Std)"]:
+            if pd.notnull(row[c]): row[c] = f"{row[c]:.2f}"
+        return row
+    return stats.apply(_fmt_row, axis=1)
+
+def build_crexi_stats_table(comps_crexi: pd.DataFrame) -> pd.DataFrame:
+    if comps_crexi.empty:
+        return pd.DataFrame(columns=[
+            "Metric","Mean","Std","Min","Max","Count"
+        ])
+    cols = {
+        "asking_price": "Asking Price",
+        "cap_rate": "Cap Rate",
+        "noi": "NOI",
+        "sqft": "SqFt",
+        "units": "Units",
+        "acres": "Acres",
+        "price_per_sqft": "Price/SqFt",
+        "price_per_unit": "Price/Unit",
+        "price_per_acre": "Price/Acre",
+        "distance_miles": "Distance (mi)",
+    }
+    rows = []
+    for k, label in cols.items():
+        s = comps_crexi[k]
+        mean = s.mean(); std = s.std(ddof=1); mn = s.min(); mx = s.max(); cnt = s.count()
+        rows.append([label, mean, std, mn, mx, int(cnt)])
+    df = pd.DataFrame(rows, columns=["Metric","Mean","Std","Min","Max","Count"])
+
+    # format
+    money_like = {"Asking Price","NOI","Price/SqFt","Price/Unit","Price/Acre"}
+    int_like   = {"Units"}
+    percent_like = {"Cap Rate"}
+    def _fmt_row(row):
+        lab = row["Metric"]
+        if lab in money_like:
+            for c in ["Mean","Std","Min","Max"]:
+                if pd.notnull(row[c]): row[c] = fmt_money(row[c])
+        elif lab in int_like:
+            for c in ["Mean","Std","Min","Max"]:
+                if pd.notnull(row[c]): row[c] = f"{row[c]:.0f}"
+        elif lab in percent_like:
+            for c in ["Mean","Std","Min","Max"]:
+                if pd.notnull(row[c]): row[c] = fmt_percent(row[c])
+        elif lab in {"SqFt","Acres","Distance (mi)"}:
+            for c in ["Mean","Std","Min","Max"]:
+                if pd.notnull(row[c]):
+                    row[c] = f"{row[c]:.2f}" if lab != "SqFt" else f"{row[c]:.0f}"
+        else:
+            for c in ["Mean","Std","Min","Max"]:
+                if pd.notnull(row[c]): row[c] = f"{row[c]:.2f}"
+        row["Count"] = f"{int(row['Count'])}"
+        return row
+    return df.apply(_fmt_row, axis=1)
 
 # ======================
 # UI
@@ -610,33 +707,26 @@ if run:
     all_df = build_all_metrics_table(om, crexi_avg, realtor_avg)
     st.dataframe(all_df, use_container_width=True, hide_index=True)
 
-    # ---------- Raw stats tables (place near the three-column table) ----------
-    st.markdown("### Filtered Comps Raw Stats")
+    # ---------- Raw stats tables (near the three-column table) ----------
+    st.markdown("### Filtered Comps — Raw Stats")
+
     col_r, col_c = st.columns(2)
 
-    with col_c:
-        with st.expander("Crexi filtered comps — numeric summary", expanded=False):
-            st.write(f"Comps after filters: **{len(comps_crexi)} / {len(comps_crexi_all)}**")
-            if comps_crexi.empty:
-                st.info("No Crexi comps passed your current filters.")
-            else:
-                num_only = comps_crexi.select_dtypes(include=[np.number])
-                if num_only.shape[1] == 0:
-                    st.dataframe(comps_crexi.head(20), use_container_width=True, hide_index=True)
-                else:
-                    st.dataframe(num_only.describe().T, use_container_width=True)
-
     with col_r:
-        with st.expander("Realtor filtered rent comps — numeric summary", expanded=False):
-            st.write(f"Rent comps after distance filter: **{len(comps_realtor)} / {len(comps_realtor_all)}**")
-            if comps_realtor.empty:
-                st.info("No Realtor comps within max distance.")
-            else:
-                num_only_r = comps_realtor.select_dtypes(include=[np.number])
-                if num_only_r.shape[1] == 0:
-                    st.dataframe(comps_realtor.head(20), use_container_width=True, hide_index=True)
-                else:
-                    st.dataframe(num_only_r.describe().T, use_container_width=True)
+        st.caption("Realtor Rent Comps — Filtered Stats (by Unit Type + Overall)")
+        realtor_stats = build_realtor_stats_table(comps_realtor)
+        if realtor_stats.empty:
+            st.info("No Realtor comps within max distance.")
+        else:
+            st.dataframe(realtor_stats, use_container_width=True, hide_index=True)
+
+    with col_c:
+        st.caption("Crexi Comps — Filtered Stats (Core Metrics)")
+        crexi_stats = build_crexi_stats_table(comps_crexi)
+        if crexi_stats.empty:
+            st.info("No Crexi comps passed your current filters.")
+        else:
+            st.dataframe(crexi_stats, use_container_width=True, hide_index=True)
 
 else:
     st.info("Set filters, drop an OM **PDF** (optional), then click **Run Demo**.")
