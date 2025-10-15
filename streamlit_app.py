@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List
 
 st.set_page_config(page_title="CRE Scraping Demo (Puppet)", layout="wide")
 
@@ -102,14 +102,11 @@ def pct_dev(value: Optional[float], ref: Optional[float]) -> Optional[float]:
     return (float(value) - float(ref)) / float(ref)
 
 def dev_color(dev: Optional[float]) -> str:
-    if dev is None:
-        return ""
+    if dev is None: return ""
     a = abs(dev)
-    if a <= 0.05:      # ≤5% green
-        return "#c8e6c9"
-    if a <= 0.10:      # ≤10% amber
-        return "#ffe0b2"
-    return "#ffcdd2"   # >10% red
+    if a <= 0.05:   return "#c8e6c9"  # greenish
+    if a <= 0.10:   return "#ffe0b2"  # amber
+    return "#ffcdd2"                  # red-ish
 
 # ======================
 # Comps synthesis + filtering (drives "Crexi Avg")
@@ -125,7 +122,7 @@ def synthetic_comps(base: Dict[str, Any], n=300, seed=7) -> pd.DataFrame:
 
     # jitter scales
     ask_sigma = 0.12   # 12%
-    units_sigma = 0.20 # ±20% of units in count space
+    units_sigma = 0.20 # ±20%
     sqft_sigma = 0.12
     acres_sigma = 0.18
     cap_sigma = 0.008  # ±80 bps
@@ -215,7 +212,7 @@ def build_rent_df(om: Dict[str, Any], realtor: Dict[str, Any]) -> pd.DataFrame:
         om_rent  = om.get(rent_key)
         r_rent   = realtor.get(rent_key)
 
-        # average baseline for % deviation = mean(OM, Realtor) when both present
+        # baseline for % deviation = mean(OM, Realtor) when both present
         vals = [v for v in [om_rent, r_rent] if isinstance(v, (int, float))]
         avg_rent = float(np.mean(vals)) if vals else None
         dev_vs_avg = pct_dev(om_rent, avg_rent)
@@ -312,10 +309,10 @@ def style_rent_df(df: pd.DataFrame, totals: Dict[str, Any]) -> "pd.io.formats.st
         n = len(df)
         for i in range(len(show)):
             if i < n:
-                r_rent, dev = df.iloc[i]["Avg Rent"]
+                _, dev = df.iloc[i]["Avg Rent"]
                 styles.append(f"background-color: {dev_color(dev)};")
             else:
-                styles.append("")  # totals: no fill, readable
+                styles.append("")  # totals: no fill
         return styles
 
     styler = styler.apply(lambda _: avg_rent_colors(), axis=0, subset=["Avg Rent"])
@@ -325,7 +322,7 @@ def style_rent_df(df: pd.DataFrame, totals: Dict[str, Any]) -> "pd.io.formats.st
     return styler
 
 # ======================
-# Financials table (uses filtered Crexi averages)
+# Financials (uses filtered Crexi averages)
 # ======================
 def compute_price_metrics(asking: Optional[float], sqft: Optional[float],
                           units: Optional[float], acres: Optional[float]):
@@ -334,7 +331,7 @@ def compute_price_metrics(asking: Optional[float], sqft: Optional[float],
     ppa = asking / acres if isinstance(asking,(int,float)) and isinstance(acres,(int,float)) and acres else None
     return pps, ppu, ppa
 
-def build_financials_table(om: Dict[str, Any], crexi_avg: Dict[str, Any]) -> pd.DataFrame:
+def build_financials_styler(om: Dict[str, Any], crexi_avg: Dict[str, Any]) -> "pd.io.formats.style.Styler":
     om_price = om.get("asking_price")
     om_noi   = om.get("noi")
     om_cap   = om.get("cap_rate")
@@ -360,29 +357,32 @@ def build_financials_table(om: Dict[str, Any], crexi_avg: Dict[str, Any]) -> pd.
         ("Price/Acre",   om_ppa,   cx_ppa,   pct_dev(om_ppa,   cx_ppa),   fmt_money),
     ]
     df = pd.DataFrame(rows, columns=["Metric", "OM", "Crexi Avg", "Deviation", "_fmt"])
-    # Style-ready
+
+    # Presentation
     show = df.copy()
     for i, row in df.iterrows():
         f = row["_fmt"]
-        show.at[i,"OM"] = f(row["OM"]) if callable(f) and isinstance(row["OM"],(int,float)) else row["OM"]
-        show.at[i,"Crexi Avg"] = f(row["Crexi Avg"]) if callable(f) and isinstance(row["Crexi Avg"],(int,float)) else row["Crexi Avg"]
-        show.at[i,"Deviation"] = signed_pct(row["Deviation"])
-    styler = show[["Metric","OM","Crexi Avg","Deviation"]].style
+        show.at[i, "OM"] = f(row["OM"]) if callable(f) and isinstance(row["OM"], (int,float)) else row["OM"]
+        show.at[i, "Crexi Avg"] = f(row["Crexi Avg"]) if callable(f) and isinstance(row["Crexi Avg"], (int,float)) else row["Crexi Avg"]
+        show.at[i, "Deviation"] = signed_pct(row["Deviation"])
+
+    styler = show[["Metric", "OM", "Crexi Avg", "Deviation"]].style
+
     def colors():
         out=[]
         for _, r in df.iterrows():
             out.append(f"background-color: {dev_color(r['Deviation'])};" if isinstance(r["Deviation"],(int,float)) else "")
         return out
+
     return styler.apply(lambda _: colors(), axis=0, subset=["Deviation"])
 
 # ======================
 # All metrics table (OM, Crexi Avg (filtered), Realtor)
-# For Address, Units, OZ, Lot Size -> OM only (blank others)
+# Address, Units, OZ, Lot Size -> OM only (blank others)
 # ======================
 def build_all_metrics_table(om: Dict[str, Any], crexi_avg: Dict[str, Any], realtor: Dict[str, Any]) -> pd.DataFrame:
-    rows = []
-    def add(name, om_val=None, cx_val=None, r_val=None, fmt=None,
-            om_only=False):
+    rows: List[List[Any]] = []
+    def add(name, om_val=None, cx_val=None, r_val=None, fmt=None, om_only=False):
         cx = None if om_only else cx_val
         r  = None if om_only else r_val
         if fmt and isinstance(om_val,(int,float)): om_val = fmt(om_val)
@@ -390,13 +390,21 @@ def build_all_metrics_table(om: Dict[str, Any], crexi_avg: Dict[str, Any], realt
         if fmt and isinstance(r,(int,float)):       r      = fmt(r)
         rows.append([name, om_val, cx, r])
 
+    # OM-only rows
     add("Address", om.get("address"), om_only=True)
     add("OZ Status", om.get("oz_status"), om_only=True)
     add("Total Units", om.get("total_units"), om_only=True, fmt=lambda v: int(round(v)))
     add("Lot Size (acres)", om.get("lot_size"), om_only=True, fmt=lambda v: float(v))
 
-    add("Rentable Sq Ft", om.get("rentable_sqft"), crexi_avg.get("SqFt"), realtor.get("rentable_sqft"), fmt=lambda v: int(round(v)))
-    add("Avg Sq Ft / Unit", om.get("avg_sqft_per_type"), crexi_avg.get("SqFt")/om.get("total_units") if isinstance(crexi_avg.get("SqFt"),(int,float)) and isinstance(om.get("total_units"),(int,float)) and om.get("total_units")!=0 else None, realtor.get("avg_sqft_per_type"), fmt=lambda v: int(round(v)) if isinstance(v,(int,float)) else v)
+    # Shared rows
+    add("Rentable Sq Ft", om.get("rentable_sqft"), crexi_avg.get("SqFt"), realtor.get("rentable_sqft"),
+        fmt=lambda v: int(round(v)) if isinstance(v,(int,float)) else v)
+    # For Crexi Avg SqFt/Unit we divide filtered avg SqFt by OM units (to keep unit basis consistent)
+    cx_avg_sqft_unit = (crexi_avg.get("SqFt") / om.get("total_units")
+                        if isinstance(crexi_avg.get("SqFt"), (int,float)) and isinstance(om.get("total_units"), (int,float)) and om.get("total_units") != 0
+                        else None)
+    add("Avg Sq Ft / Unit", om.get("avg_sqft_per_type"), cx_avg_sqft_unit, realtor.get("avg_sqft_per_type"),
+        fmt=lambda v: int(round(v)) if isinstance(v,(int,float)) else v)
 
     add("Asking Price", om.get("asking_price"), crexi_avg.get("Asking Price"), realtor.get("asking_price"), fmt=fmt_money)
     add("NOI", om.get("noi"), crexi_avg.get("NOI"), None, fmt=fmt_money)
@@ -499,17 +507,16 @@ if run:
     crexi_avg = crexi_avgs_from_filtered(filtered)
 
     with st.expander("Filtered comps summary", expanded=False):
-    st.write(f"Comps after filters: **{len(filtered)} / {len(comps)}**")
-    if filtered.empty:
-        st.info("No comps passed your current filters. Loosen one or more sliders to see stats.")
-    else:
-        # Select numeric columns explicitly to avoid pandas version issues with numeric_only
-        num_only = filtered.select_dtypes(include=[np.number])
-        # If for some reason there are no numeric columns left, show the head instead
-        if num_only.shape[1] == 0:
-            st.dataframe(filtered.head(20), use_container_width=True, hide_index=True)
+        st.write(f"Comps after filters: **{len(filtered)} / {len(comps)}**")
+        if filtered.empty:
+            st.info("No comps passed your current filters. Loosen one or more sliders to see stats.")
         else:
-            st.dataframe(num_only.describe().T, use_container_width=True)
+            # select numeric cols explicitly (avoids pandas version issues)
+            num_only = filtered.select_dtypes(include=[np.number])
+            if num_only.shape[1] == 0:
+                st.dataframe(filtered.head(20), use_container_width=True, hide_index=True)
+            else:
+                st.dataframe(num_only.describe().T, use_container_width=True)
 
     # ---------- Rent table (with weighted totals) ----------
     st.subheader("Unit Rents & GPR (OM vs Realtor)")
@@ -519,7 +526,7 @@ if run:
 
     # ---------- Financials (uses filtered Crexi averages) ----------
     st.subheader("Financials")
-    fin_styler = build_financials_table(om, crexi_avg)
+    fin_styler = build_financials_styler(om, crexi_avg)
     st.dataframe(fin_styler, use_container_width=True, hide_index=True)
 
     # ---------- Vacancy & EGI ----------
