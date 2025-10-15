@@ -499,9 +499,17 @@ if run:
     crexi_avg = crexi_avgs_from_filtered(filtered)
 
     with st.expander("Filtered comps summary", expanded=False):
-        st.write(f"Comps after filters: **{len(filtered)} / {len(comps)}**")
-        if len(filtered):
-            st.dataframe(filtered.describe(numeric_only=True).T, use_container_width=True)
+    st.write(f"Comps after filters: **{len(filtered)} / {len(comps)}**")
+    if filtered.empty:
+        st.info("No comps passed your current filters. Loosen one or more sliders to see stats.")
+    else:
+        # Select numeric columns explicitly to avoid pandas version issues with numeric_only
+        num_only = filtered.select_dtypes(include=[np.number])
+        # If for some reason there are no numeric columns left, show the head instead
+        if num_only.shape[1] == 0:
+            st.dataframe(filtered.head(20), use_container_width=True, hide_index=True)
+        else:
+            st.dataframe(num_only.describe().T, use_container_width=True)
 
     # ---------- Rent table (with weighted totals) ----------
     st.subheader("Unit Rents & GPR (OM vs Realtor)")
