@@ -51,10 +51,7 @@ def fetch_crexi(query: str, mock: Optional[Dict[str, Any]] = None) -> Dict[str, 
         return mock
     return {
         "address": query or "123 Main St, Tampa, FL",
-        "avg_rent_1bd": 1545,
-        "avg_rent_2bd": 1970,
-        "avg_rent_3bd": 2280,
-        "avg_rent_4bd": 2580,
+        "avg_rent_1bd": 1545, "avg_rent_2bd": 1970, "avg_rent_3bd": 2280, "avg_rent_4bd": 2580,
         "units_1bd": 32, "units_2bd": 48, "units_3bd": 30, "units_4bd": 10,
         "avg_sqft_per_type": 910,
 
@@ -75,12 +72,12 @@ def fetch_realtor(query: str, mock: Optional[Dict[str, Any]] = None) -> Dict[str
         return mock
     return {
         "address": query or "123 Main St, Tampa, FL",
-        "avg_rent_1bd": 1525, "avg_rent_2bd": 1935,
-        "avg_rent_3bd": 2260, "avg_rent_4bd": 2550,
+        "avg_rent_1bd": 1525, "avg_rent_2bd": 1935, "avg_rent_3bd": 2260, "avg_rent_4bd": 2550,
         "units_1bd": 29, "units_2bd": 49,
         "total_units": 118,
         "asking_price": 33_500_000,
-        # realtor often lacks NOI / sqft; that's fine for the demo
+        # Added so Avg Sq Ft section populates
+        "avg_sqft_per_type": 900,
     }
 
 # ======================
@@ -129,10 +126,10 @@ def fmt_number(key: str, x):
     if not isinstance(x, (int, float)):
         return x
     if key in NO_COMMA_KEYS:
-        return f"{int(x)}" if float(x).is_integer() else f"{x}"
+        return f"{int(round(x))}" if float(x).is_integer() else f"{x}"
     if abs(x) >= 1000:
         if float(x).is_integer():
-            return f"{int(x):,d}"
+            return f"{int(round(x)):,d}"
         return f"{x:,.2f}"
     return f"{x:.3f}".rstrip("0").rstrip(".")
 
@@ -175,7 +172,7 @@ def signed_pct(x: Optional[float]) -> str:
 def year_age_category(year_val: Optional[float]) -> str:
     if not isinstance(year_val, (int, float)):
         return "—"
-    y = int(year_val)
+    y = int(round(year_val))
     current_year = datetime.now().year
     age = max(0, current_year - y)
     if age <= 5: return "Very New"
@@ -204,8 +201,6 @@ def build_rent_df(om: Dict[str, Any], realtor: Dict[str, Any]) -> pd.DataFrame:
         vals = [v for v in [om_rent, r_rent] if isinstance(v, (int, float))]
         avg_rent = float(np.mean(vals)) if vals else None
         dev_vs_avg = pct_dev_from_ref(om_rent, avg_rent)
-
-        thresh = threshold_pct_vs_ref(tol_abs, None, avg_rent)
 
         # GPRs (annual) using OM units always
         gpr_om = gpr_r = None
@@ -291,12 +286,8 @@ def build_location_df(om: Dict[str, Any], crexi: Dict[str, Any]) -> pd.DataFrame
         if typ == "year":
             category = year_age_category(o)
             rows.append({
-                "Metric": label,
-                "OM": o,
-                "Crexi": c,
-                "Δ vs Crexi / Category": category,
-                "_key": key,
-                "_type": typ,
+                "Metric": label, "OM": o, "Crexi": c,
+                "Δ vs Crexi / Category": category, "_key": key, "_type": typ,
             })
         else:
             tol_abs = rule.get("tol_abs", None)
@@ -304,12 +295,8 @@ def build_location_df(om: Dict[str, Any], crexi: Dict[str, Any]) -> pd.DataFrame
             dev_c = pct_dev_from_ref(o, c)
             thresh_c = threshold_pct_vs_ref(tol_abs, tol_rel, c)
             rows.append({
-                "Metric": label,
-                "OM": o,
-                "Crexi": c,
-                "Δ vs Crexi / Category": (dev_c, thresh_c),
-                "_key": key,
-                "_type": typ,
+                "Metric": label, "OM": o, "Crexi": c,
+                "Δ vs Crexi / Category": (dev_c, thresh_c), "_key": key, "_type": typ,
             })
     return pd.DataFrame(rows)
 
@@ -334,11 +321,10 @@ def style_location_df(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
     # Color numeric Δ% cells
     def colors_for_delta():
         out = []
-        for _, row in df.iterrows():
+        for idx, row in df.iterrows():
             cell = row["Δ vs Crexi / Category"]
-            raw = df.loc[_, "Δ vs Crexi / Category"]
-            if isinstance(raw, tuple) and len(raw) == 2:
-                dev, thr = raw
+            if isinstance(cell, tuple) and len(cell) == 2:
+                dev, thr = cell
                 out.append(f"background-color: {color_by_dev(dev, thr)};")
             else:
                 out.append("")  # year category
@@ -352,43 +338,75 @@ def style_location_df(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
     return styler
 
 # ======================
-# Box plots (synthetic) sections
+# Plot theming utilities (compact, centered, dark)
 # ======================
-def _synthetic_samples(mu: float, sigma: float, n: int = 500) -> np.ndarray:
-    return np.random.normal(loc=float(mu), scale=max(float(sigma), 1e-6), size=n)
-
-def boxplot_single_series(data: np.ndarray, label: str, title: str, y_label: str) -> Optional[plt.Figure]:
-    if data.size == 0:
+def themed_boxplot(data: List[np.ndarray], labels: List[str], title: str, y_label: str) -> Optional[plt.Figure]:
+    if not data:
         return None
-    fig = plt.figure()
-    plt.boxplot([data], labels=[label], showmeans=True)
-    plt.title(title)
-    plt.ylabel(y_label)
-    plt.tight_layout()
+    fig, ax = plt.subplots(figsize=(5, 3), dpi=175)
+    fig.patch.set_facecolor('black')
+    ax.set_facecolor('black')
+
+    # boxplot styling
+    bp = ax.boxplot(data, labels=labels, showmeans=True, patch_artist=True)
+    for box in bp['boxes']:
+        box.set(facecolor='black', edgecolor='white', linewidth=1.0)
+    for whisker in bp['whiskers']:
+        whisker.set(color='white', linewidth=1.0)
+    for cap in bp['caps']:
+        cap.set(color='white', linewidth=1.0)
+    for median in bp['medians']:
+        median.set(color='#00e5ff', linewidth=1.2)  # cyan-ish for medians
+    if 'means' in bp:
+        for mean in bp['means']:
+            mean.set(color='white', marker='o', markersize=3)
+
+    ax.tick_params(colors='white')
+    ax.set_title(title, color='white', pad=6)
+    ax.set_ylabel(y_label, color='white')
+    fig.tight_layout()
     return fig
+
+# Sections
+def rent_boxplot_realtor(realtor: Dict[str, Any]) -> Optional[plt.Figure]:
+    data, labels = [], []
+    for k in RENT_KEYS:
+        conf = RENT_METRICS[k]
+        rent_key = conf["rent_key"]
+        tol_abs = conf["tol_abs"]
+        r = realtor.get(rent_key)
+        if isinstance(r, (int, float)):
+            sigma = max(float(tol_abs), 1e-6)
+            samples = np.random.normal(loc=float(r), scale=sigma, size=400)
+            data.append(samples)
+            labels.append(conf["label"])
+    return themed_boxplot(data, labels, "Realtor-only Rents (by Unit Type)", "Monthly Rent ($)")
 
 def section_boxplot_avg_sqft(om: Dict[str, Any], realtor: Dict[str, Any]) -> Optional[plt.Figure]:
     r = realtor.get("avg_sqft_per_type")
     if not isinstance(r, (int, float)):
         return None
-    samples = _synthetic_samples(r, TOL_AVG_SQFT_ABS)
-    return boxplot_single_series(samples, "Realtor", "Avg Sq Ft / Unit (Realtor-only)", "Sq Ft")
+    data = [np.random.normal(loc=float(r), scale=TOL_AVG_SQFT_ABS, size=400)]
+    labels = ["Realtor"]
+    return themed_boxplot(data, labels, "Avg Sq Ft / Unit (Realtor)", "Sq Ft")
 
-def section_boxplot_price(om: Dict[str, Any], crexi: Dict[str, Any]) -> Optional[plt.Figure]:
+def section_boxplot_price(crexi: Dict[str, Any]) -> Optional[plt.Figure]:
     c = crexi.get("asking_price")
     if not isinstance(c, (int, float)):
         return None
     sigma = abs(c) * TOL_PRICE_REL
-    samples = _synthetic_samples(c, sigma)
-    return boxplot_single_series(samples, "Crexi", "Asking Price (Crexi-only)", "Price ($)")
+    data = [np.random.normal(loc=float(c), scale=sigma, size=400)]
+    labels = ["Crexi"]
+    return themed_boxplot(data, labels, "Asking Price (Crexi)", "Price ($)")
 
-def section_boxplot_noi(om: Dict[str, Any], crexi: Dict[str, Any]) -> Optional[plt.Figure]:
+def section_boxplot_noi(crexi: Dict[str, Any]) -> Optional[plt.Figure]:
     c = crexi.get("noi")
     if not isinstance(c, (int, float)):
         return None
     sigma = abs(c) * TOL_NOI_REL
-    samples = _synthetic_samples(c, sigma)
-    return boxplot_single_series(samples, "Crexi", "NOI (Crexi-only)", "NOI ($)")
+    data = [np.random.normal(loc=float(c), scale=sigma, size=400)]
+    labels = ["Crexi"]
+    return themed_boxplot(data, labels, "NOI (Crexi)", "NOI ($)")
 
 # ======================
 # CSV export (Metric, OM, Crexi, Realtor, Recommended)
@@ -434,41 +452,46 @@ def build_export_rows(om: Dict[str, Any], crexi: Dict[str, Any], realtor: Dict[s
     }
     rows = []
     for m in metrics:
-        rec = recommended_value(m, om.get(m), crexi.get(m), realtor.get(m))
         rows.append({
             "Metric": labels[m],
             "OM": om.get(m),
             "Crexi": crexi.get(m),
             "Realtor": realtor.get(m),
-            "Recommended": rec
+            "Recommended": recommended_value(m, om.get(m), crexi.get(m), realtor.get(m)),
         })
     return pd.DataFrame(rows)
 
 def format_export_df(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     for i, row in out.iterrows():
-        key = None
-        # find metric key by reverse map (not stored); infer from label map for formatting simplicity
-        # we'll format by guessing types based on label
         label = row["Metric"]
         val_cols = ["OM","Crexi","Realtor","Recommended"]
+
         def fmt_auto(lbl, v):
-            if v is None or not isinstance(v, (int,float)): return v
+            # leave non-numeric as-is
+            if v is None or not isinstance(v, (int, float)):
+                return v
+            # money-like
             if "Price" in lbl or lbl in ["NOI"]:
                 return fmt_money(v)
+            # percents
             if "Cap Rate" in lbl or "Expense Ratio" in lbl:
                 return fmt_percent(v)
+            # year
             if "Year" in lbl:
-                return f"{int(v)}"
+                return f"{int(round(v))}"
+            # counts & sizes
+            if "Units" in lbl:
+                return f"{int(round(v))}"
             if "Sq Ft" in lbl:
                 return fmt_number("generic", v)
-            if "Rent" in lbl:
-                return fmt_money(v)
-            if "Units" in lbl:
-                return f"{int(v)}"
             if "Lot Size" in lbl:
                 return fmt_number("generic", v)
+            # rents
+            if "Rent" in lbl:
+                return fmt_money(v)
             return fmt_number("generic", v)
+
         for c in val_cols:
             out.at[i, c] = fmt_auto(label, row[c])
     return out
@@ -477,7 +500,7 @@ def format_export_df(df: pd.DataFrame) -> pd.DataFrame:
 # UI
 # ======================
 st.title("🏗️ CRE Scraping Demo (Puppet)")
-st.caption("Property summary + rent deviations (Realtor) & selected location comps (vs Crexi). Plus OZ market stat and three box-plot sections.")
+st.caption("Property summary + rents (Realtor) & selected location comps (vs Crexi). Compact dark box plots; downloadable CSV with recommended values.")
 
 with st.sidebar:
     st.header("Controls")
@@ -532,25 +555,35 @@ if run:
     rent_df_raw = build_rent_df(om, realtor)
     st.dataframe(style_rent_df(rent_df_raw), use_container_width=True, hide_index=True)
 
-    # ---------- Box Plot: Avg Sq Ft / Unit (Realtor) ----------
-    st.subheader("Avg Sq Ft / Unit — Realtor Box Plot")
+    # ---------- Realtor-only Rent Distributions (compact, centered) ----------
+    fig_rents = rent_boxplot_realtor(realtor)
+    if fig_rents is not None:
+        _, mid, _ = st.columns([1,2,1])
+        with mid:
+            st.pyplot(fig_rents, use_container_width=False)
+
+    # ---------- Avg Sq Ft / Unit — Realtor Box Plot (compact, centered) ----------
     fig_sqft = section_boxplot_avg_sqft(om, realtor)
     if fig_sqft is not None:
-        st.pyplot(fig_sqft)
+        _, mid, _ = st.columns([1,2,1])
+        with mid:
+            st.pyplot(fig_sqft, use_container_width=False)
 
-    # ---------- Box Plot: Asking Price (Crexi) ----------
-    st.subheader("Asking Price — Crexi Box Plot")
-    fig_price = section_boxplot_price(om, crexi)
+    # ---------- Asking Price — Crexi Box Plot (compact, centered) ----------
+    fig_price = section_boxplot_price(crexi)
     if fig_price is not None:
-        st.pyplot(fig_price)
+        _, mid, _ = st.columns([1,2,1])
+        with mid:
+            st.pyplot(fig_price, use_container_width=False)
 
-    # ---------- Box Plot: NOI (Crexi) ----------
-    st.subheader("NOI — Crexi Box Plot")
-    fig_noi = section_boxplot_noi(om, crexi)
+    # ---------- NOI — Crexi Box Plot (compact, centered) ----------
+    fig_noi = section_boxplot_noi(crexi)
     if fig_noi is not None:
-        st.pyplot(fig_noi)
+        _, mid, _ = st.columns([1,2,1])
+        with mid:
+            st.pyplot(fig_noi, use_container_width=False)
 
-    # ---------- Location Data (Selected vs Crexi) ----------
+    # ---------- Location Data (Selected Comparisons vs Crexi) ----------
     st.subheader("Location Data (Selected Comparisons vs Crexi)")
     loc_df_raw = build_location_df(om, crexi)
     st.dataframe(style_location_df(loc_df_raw), use_container_width=True, hide_index=True)
