@@ -19,13 +19,12 @@ def try_float(x):
 def parse_om(uploaded_pdf) -> Dict[str, Any]:
     """
     Puppet OM parser.
-    For this demo, we don't parse the PDF; we return a sample OM.
-    Upload prompt is PDF to match your workflow/UX; swap in a real parser later.
+    For this demo we don't parse the PDF; we return a sample OM with rents higher than Realtor.
+    Swap with your real PDF parser later.
     """
-    # --- Sample OM values (rents intentionally HIGH vs Realtor for the demo) ---
     return {
         "address": "123 Main St, Tampa, FL",
-        # Unit Info (rents high to show deviation)
+        # Unit Info (rents high vs Realtor for demo)
         "avg_rent_1bd": 1650,  # realtor 1525
         "units_1bd": 31,
         "avg_rent_2bd": 2100,  # realtor 1935
@@ -43,7 +42,7 @@ def parse_om(uploaded_pdf) -> Dict[str, Any]:
         "oz_status": "No",
         "total_units": 120,
 
-        # Financials
+        # Financials (summary-only)
         "noi": 1_890_000,
         "cap_rate": 0.054,
         "asking_price": 34_250_000,
@@ -53,10 +52,8 @@ def parse_om(uploaded_pdf) -> Dict[str, Any]:
 def fetch_crexi(query: str, mock: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if mock is not None:
         return mock
-    # Simulated market values
     return {
         "address": query or "123 Main St, Tampa, FL",
-        # We include rents for value display; deviation uses OM vs Crexi
         "avg_rent_1bd": 1545,
         "avg_rent_2bd": 1970,
         "avg_rent_3bd": 2280,
@@ -88,51 +85,68 @@ def fetch_realtor(query: str, mock: Optional[Dict[str, Any]] = None) -> Dict[str
         "avg_rent_2bd": 1935,
         "avg_rent_3bd": 2260,
         "avg_rent_4bd": 2550,
-        "units_1bd": 29,           # sometimes inferred; may be missing in real life
+        "units_1bd": 29,
         "units_2bd": 49,
         "total_units": 118,
         "asking_price": 33_500_000,
-        # realtor often lacks many ops metrics; that's fine
     }
 
 # ======================
 # Metric schema + groups
 # ======================
-# rule: type + tolerance (either tol_abs or tol_rel) for color thresholds
-METRICS: List[Tuple[str, Dict[str, Any]]] = [
-    # Unit Info
-    ("avg_rent_1bd", {"label": "Avg. Rent (1 Bed)", "group": "Unit Info", "type": "num", "tol_abs": 50}),
-    ("units_1bd",    {"label": "# Units (1 Bed)",   "group": "Unit Info", "type": "num", "tol_abs": 2}),
-    ("avg_rent_2bd", {"label": "Avg. Rent (2 Bed)", "group": "Unit Info", "type": "num", "tol_abs": 75}),
-    ("units_2bd",    {"label": "# Units (2 Bed)",   "group": "Unit Info", "type": "num", "tol_abs": 2}),
-    ("avg_rent_3bd", {"label": "Avg. Rent (3 Bed)", "group": "Unit Info", "type": "num", "tol_abs": 100}),
-    ("units_3bd",    {"label": "# Units (3 Bed)",   "group": "Unit Info", "type": "num", "tol_abs": 2}),
-    ("avg_rent_4bd", {"label": "Avg. Rent (4 Bed)", "group": "Unit Info", "type": "num", "tol_abs": 120}),
-    ("units_4bd",    {"label": "# Units (4 Bed)",   "group": "Unit Info", "type": "num", "tol_abs": 2}),
-    ("avg_sqft_per_type", {"label": "Avg. Sq. Ft. (per unit type)", "group": "Unit Info", "type": "num", "tol_abs": 50}),
+RENT_KEYS = ["1bd", "2bd", "3bd", "4bd"]
+RENT_METRICS = {
+    "1bd": {"rent_key": "avg_rent_1bd", "units_key": "units_1bd", "label": "1 Bed", "tol_abs": 50},
+    "2bd": {"rent_key": "avg_rent_2bd", "units_key": "units_2bd", "label": "2 Bed", "tol_abs": 75},
+    "3bd": {"rent_key": "avg_rent_3bd", "units_key": "units_3bd", "label": "3 Bed", "tol_abs": 100},
+    "4bd": {"rent_key": "avg_rent_4bd", "units_key": "units_4bd", "label": "4 Bed", "tol_abs": 120},
+}
 
-    # Location Data
-    ("address",            {"label": "Address", "group": "Location Data", "type": "str"}),
-    ("lot_size",           {"label": "Lot Size (acres)", "group": "Location Data", "type": "num", "tol_rel": 0.10}),
-    ("year_built_or_renov",{"label": "Year Built / Renovated", "group": "Location Data", "type": "num", "tol_abs": 3}),
-    ("rentable_sqft",      {"label": "Rentable Sq. Ft.", "group": "Location Data", "type": "num", "tol_rel": 0.05}),
-    ("oz_status",          {"label": "Opportunity Zone (OZ) Status", "group": "Location Data", "type": "str"}),
-    ("total_units",        {"label": "Total Units", "group": "Location Data", "type": "num", "tol_abs": 2}),
-
-    # Financials
-    ("noi",            {"label": "NOI", "group": "Financials", "type": "num", "tol_rel": 0.05}),
-    ("cap_rate",       {"label": "Cap Rate", "group": "Financials", "type": "num", "tol_rel": 0.01}),
-    ("asking_price",   {"label": "Asking Price", "group": "Financials", "type": "num", "tol_rel": 0.03}),
-    ("expense_ratio",  {"label": "Expense Ratio / Cost", "group": "Financials", "type": "num", "tol_rel": 0.05}),
+# Location Data — only these are compared
+LOC_METRICS: List[Tuple[str, Dict[str, Any]]] = [
+    ("total_units",       {"label": "Total Units",              "type": "num", "tol_abs": 2}),
+    ("lot_size",          {"label": "Lot Size (acres)",         "type": "num", "tol_rel": 0.10}),
+    ("year_built_or_renov", {"label": "Year Built / Renovated", "type": "num", "tol_abs": 3}),
+    ("rentable_sqft",     {"label": "Rentable Sq. Ft.",         "type": "num", "tol_rel": 0.05}),
 ]
 
-GROUPS = ["Unit Info", "Location Data", "Financials"]
-# Metrics we shouldn't comma-format (e.g., years)
+# Fields shown only in Property Summary (no comparisons table)
+SUMMARY_FIELDS = [
+    ("address",       "Address",             "text"),
+    ("oz_status",     "OZ Status",           "text"),
+    ("avg_sqft_per_type", "Avg Sq Ft / Unit","num"),
+    ("noi",           "NOI",                 "money"),
+    ("cap_rate",      "Cap Rate",            "percent"),
+    ("asking_price",  "Asking Price",        "money"),
+    ("expense_ratio", "Expense Ratio",       "percent"),
+]
+
 NO_COMMA_KEYS = {"year_built_or_renov"}
 
 # ======================
-# Deviation math (OM vs Realtor, OM vs Crexi)
+# Formatting + tolerance helpers
 # ======================
+def fmt_money(x):
+    if isinstance(x, (int, float)):
+        return f"${int(round(x)):,}"
+    return x
+
+def fmt_percent(x):
+    if isinstance(x, (int, float)):
+        return f"{x*100:.1f}%"
+    return x
+
+def fmt_number(key: str, x):
+    if not isinstance(x, (int, float)):
+        return x
+    if key in NO_COMMA_KEYS:
+        return f"{int(x)}" if float(x).is_integer() else f"{x}"
+    if abs(x) >= 1000:
+        if float(x).is_integer():
+            return f"{int(x):,d}"
+        return f"{x:,.2f}"
+    return f"{x:.3f}".rstrip("0").rstrip(".")
+
 def pct_dev_from_ref(value: Optional[float], ref: Optional[float]) -> Optional[float]:
     if value is None or ref is None:
         return None
@@ -142,14 +156,12 @@ def pct_dev_from_ref(value: Optional[float], ref: Optional[float]) -> Optional[f
         return None
     return (float(value) - float(ref)) / float(ref)
 
-def threshold_pct_vs_ref(rule: Dict[str, Any], ref: Optional[float]) -> float:
+def threshold_pct_vs_ref(tol_abs: Optional[float], tol_rel: Optional[float], ref: Optional[float]) -> float:
     """Convert tolerance into a percent-of-reference threshold."""
     if not isinstance(ref, (int, float)) or ref == 0:
-        return 0.05  # fallback
-    tol_rel = rule.get("tol_rel", None)
+        return 0.05
     if isinstance(tol_rel, (int, float)):
         return float(tol_rel)
-    tol_abs = rule.get("tol_abs", None)
     if isinstance(tol_abs, (int, float)):
         return abs(float(tol_abs)) / abs(float(ref))
     return 0.05
@@ -160,96 +172,152 @@ def color_by_dev(dev: Optional[float], thresh: float) -> str:
         return ""
     adev = abs(dev)
     if adev <= thresh:
-        return "background-color: #c8e6c9"  # green
+        return "green"
     if adev <= 2 * thresh:
-        return "background-color: #ffe0b2"  # amber
-    return "background-color: #ffcdd2"      # red
+        return "#ff9800"  # amber
+    return "red"
 
 # ======================
-# Table build + styling
+# Rent table (Units # | Avg Rent | GPR)
 # ======================
-def build_rows(om: Dict[str, Any], crexi: Dict[str, Any], realtor: Dict[str, Any], group: str) -> pd.DataFrame:
+def build_rent_df(om: Dict[str, Any], realtor: Dict[str, Any]) -> pd.DataFrame:
     rows = []
-    for key, rule in METRICS:
-        if rule["group"] != group:
-            continue
-        label = rule.get("label", key)
+    for k in RENT_KEYS:
+        conf = RENT_METRICS[k]
+        rent_key = conf["rent_key"]
+        units_key = conf["units_key"]
+        label = conf["label"]
+        tol_abs = conf["tol_abs"]
+
+        om_units = om.get(units_key)
+        om_rent  = om.get(rent_key)
+        r_rent   = realtor.get(rent_key)
+
+        dev = pct_dev_from_ref(om_rent, r_rent)
+        thresh = threshold_pct_vs_ref(tol_abs, None, r_rent)
+
+        # GPRs (annual)
+        gpr_om = None
+        gpr_r  = None
+        if isinstance(om_units, (int, float)):
+            if isinstance(om_rent, (int, float)):
+                gpr_om = om_units * om_rent * 12
+            if isinstance(r_rent, (int, float)):
+                gpr_r  = om_units * r_rent  * 12
+
+        rows.append({
+            "Unit Type": label,
+            "Units #": int(om_units) if isinstance(om_units, (int, float)) else om_units,
+            "Avg Rent": om_rent,
+            "GPR": (gpr_om, gpr_r),
+            "_dev": dev,
+            "_thresh": thresh,
+            "_rent_key": rent_key,
+        })
+    return pd.DataFrame(rows)
+
+def style_rent_df(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
+    show = df.copy()
+
+    # Format columns
+    show["Units #"] = show["Units #"].apply(lambda x: f"{int(x)}" if isinstance(x, (int, float)) else x)
+    show["Avg Rent"] = show["Avg Rent"].apply(fmt_money)
+    def fmt_gpr(pair):
+        if not isinstance(pair, tuple):
+            return ""
+        om, rr = pair
+        om_s = fmt_money(om) if om is not None else "—"
+        rr_s = fmt_money(rr) if rr is not None else "—"
+        return f"OM: {om_s} | R: {rr_s}"
+    show["GPR"] = show["GPR"].apply(fmt_gpr)
+
+    styler = show[["Unit Type", "Units #", "Avg Rent", "GPR"]].style
+
+    # Color bar on the LEFT of the Avg Rent cell (based on OM vs Realtor deviation)
+    def left_bar_colors():
+        styles = []
+        for _, row in df.iterrows():
+            col = color_by_dev(row["_dev"], row["_thresh"])
+            if col:
+                styles.append(f"border-left: 8px solid {col}; padding-left: 6px;")
+            else:
+                styles.append("")
+        return styles
+
+    # Apply styles
+    styler = styler.apply(lambda _: left_bar_colors(), axis=0, subset=["Avg Rent"])
+
+    # Zebra for readability
+    styler = styler.set_properties(**{"border-color": "#ddd"}) \
+                   .set_table_styles([{"selector": "tbody tr:nth-child(even)",
+                                       "props": [("background-color", "#fafafa")]}])
+    return styler
+
+# ======================
+# Location data table (only selected metrics compared)
+# ======================
+def build_location_df(om: Dict[str, Any], crexi: Dict[str, Any], realtor: Dict[str, Any]) -> pd.DataFrame:
+    rows = []
+    for key, rule in LOC_METRICS:
+        label = rule["label"]
+        tol_abs = rule.get("tol_abs", None)
+        tol_rel = rule.get("tol_rel", None)
 
         o = om.get(key)
         c = crexi.get(key)
         r = realtor.get(key)
 
-        row = {
+        dev_r = pct_dev_from_ref(o, r)
+        dev_c = pct_dev_from_ref(o, c)
+
+        thresh_r = threshold_pct_vs_ref(tol_abs, tol_rel, r)
+        thresh_c = threshold_pct_vs_ref(tol_abs, tol_rel, c)
+
+        rows.append({
             "Metric": label,
             "OM": o,
-            "Crexi": c,
             "Realtor": r,
-            "OM vs Realtor Δ%": None,
-            "OM vs Crexi Δ%": None,
+            "OM vs Realtor Δ%": dev_r,
+            "Crexi": c,
+            "OM vs Crexi Δ%": dev_c,
             "_key": key,
-            "_rule": rule,
-        }
-
-        if rule["type"] == "num":
-            row["OM vs Realtor Δ%"] = pct_dev_from_ref(o, r)
-            row["OM vs Crexi Δ%"]   = pct_dev_from_ref(o, c)
-
-        rows.append(row)
+            "_tol_abs": tol_abs,
+            "_tol_rel": tol_rel,
+            "_thresh_r": thresh_r,
+            "_thresh_c": thresh_c,
+        })
     return pd.DataFrame(rows)
 
-def fmt_value(key: str, x):
-    if not isinstance(x, (int, float)):
-        return x
-    # years (and any keys in NO_COMMA_KEYS) -> no commas
-    if key in NO_COMMA_KEYS:
-        return f"{int(x)}" if float(x).is_integer() else f"{x}"
-    # everything else: commas for thousands
-    if abs(x) >= 1000:
-        # keep decimals if present
-        if float(x).is_integer():
-            return f"{int(x):,d}"
-        return f"{x:,.2f}"
-    # small numbers: print raw or up to 3 decimals
-    return f"{x:.3f}".rstrip("0").rstrip(".")
+def style_location_df(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
+    show = df.copy()
 
-def fmt_pct(x):
-    if isinstance(x, (int, float)):
-        return f"{x*100:.1f}%"
-    return ""
-
-def style_group_df(df_raw: pd.DataFrame) -> "pd.io.formats.style.Styler":
-    # Presentable copy with formatted values
-    show = df_raw.copy()
-    for i, row in df_raw.iterrows():
+    # Format values appropriately
+    for i, row in df.iterrows():
         key = row["_key"]
-        for col in ["OM", "Crexi", "Realtor"]:
-            show.at[i, col] = fmt_value(key, row[col])
-        # format the deltas
+        for col in ["OM", "Realtor", "Crexi"]:
+            show.at[i, col] = fmt_number(key, row[col])
         for col in ["OM vs Realtor Δ%", "OM vs Crexi Δ%"]:
-            show.at[i, col] = fmt_pct(row[col])
+            val = row[col]
+            show.at[i, col] = f"{val*100:.1f}%" if isinstance(val, (int, float)) else ""
 
-    styler = show.drop(columns=["_key", "_rule"]).style
+    styler = show[["Metric", "OM", "Realtor", "OM vs Realtor Δ%", "Crexi", "OM vs Crexi Δ%"]].style
 
-    # Color the deviation columns vs each source using that source as the tolerance base
-    def colorize(colname: str, ref_col: str):
-        colors = []
-        for _, row in df_raw.iterrows():
-            rule = row["_rule"]
-            if rule["type"] != "num":
-                colors.append("")
-                continue
-            ref_val = row[ref_col]  # Realtor or Crexi numeric value
-            t = threshold_pct_vs_ref(rule, ref_val)
-            dev = row[colname]
-            colors.append(color_by_dev(dev, t))
-        return colors
+    # Color the deviations
+    def colors_vs_realtor():
+        out = []
+        for _, row in df.iterrows():
+            out.append(f"background-color: {color_by_dev(row['OM vs Realtor Δ%'], row['_thresh_r'])};")
+        return out
 
-    styler = styler.apply(lambda _: colorize("OM vs Realtor Δ%", "Realtor"),
-                          axis=0, subset=["OM vs Realtor Δ%"])
-    styler = styler.apply(lambda _: colorize("OM vs Crexi Δ%", "Crexi"),
-                          axis=0, subset=["OM vs Crexi Δ%"])
+    def colors_vs_crexi():
+        out = []
+        for _, row in df.iterrows():
+            out.append(f"background-color: {color_by_dev(row['OM vs Crexi Δ%'], row['_thresh_c'])};")
+        return out
 
-    # Light zebra-striping for readability
+    styler = styler.apply(lambda _: colors_vs_realtor(), axis=0, subset=["OM vs Realtor Δ%"])
+    styler = styler.apply(lambda _: colors_vs_crexi(), axis=0, subset=["OM vs Crexi Δ%"])
+
     styler = styler.set_properties(**{"border-color": "#ddd"}) \
                    .set_table_styles([{"selector": "tbody tr:nth-child(even)",
                                        "props": [("background-color", "#fafafa")]}])
@@ -259,83 +327,75 @@ def style_group_df(df_raw: pd.DataFrame) -> "pd.io.formats.style.Styler":
 # UI
 # ======================
 st.title("🏗️ CRE Benchmarking Demo (Puppet)")
-st.caption("Shows **OM deviations** vs each market source (Realtor & Crexi). Grouped tables. PDF upload prompt (puppet).")
+st.caption("Property summary + rent deviations (OM vs Realtor) and selected location comps (OM vs Realtor/Crexi). PDF drag-and-drop; tolerances collapsed.")
 
 with st.sidebar:
     st.header("Controls")
     query = st.text_input("Search query / address", "123 Main St, Tampa, FL")
     uploaded_pdf = st.file_uploader("Drag & drop the OM **PDF** (optional)", type=["pdf"])
-    st.markdown("**Note:** This demo doesn't parse the PDF; it uses sample OM values so you can show the flow.")
-    st.divider()
-    st.subheader("Adjust tolerances")
-    # live tuning — keep rule keys clean (no tol_rel=None)
-    for i, (key, rule) in enumerate(METRICS):
-        if rule["type"] != "num":
-            continue
-        if "tol_abs" in rule:
-            new_val = st.number_input(f"{rule['label']} tol_abs",
-                                      value=float(rule["tol_abs"]), step=1.0, key=f"tol_abs_{key}")
-            new_rule = {**rule, "tol_abs": new_val}
-            if new_rule.get("tol_rel", None) is None:
-                new_rule.pop("tol_rel", None)
-            METRICS[i] = (key, new_rule)
-        elif "tol_rel" in rule:
-            new_val = st.number_input(f"{rule['label']} tol_rel",
-                                      value=float(rule["tol_rel"]), step=0.005, format="%.3f", key=f"tol_rel_{key}")
-            METRICS[i] = (key, {**rule, "tol_rel": new_val})
+    st.markdown("**Note:** Demo doesn't parse the PDF; it uses sample OM values to show the flow.")
+    with st.expander("Adjust tolerances", expanded=False):
+        # Allow adjusting rent tolerances
+        for k in RENT_KEYS:
+            conf = RENT_METRICS[k]
+            new_abs = st.number_input(f"{conf['label']} rent tol_abs ($)", value=float(conf["tol_abs"]),
+                                      step=5.0, key=f"tol_abs_rent_{k}")
+            RENT_METRICS[k]["tol_abs"] = new_abs
+        # Allow adjusting location tolerances
+        for i, (key, rule) in enumerate(LOC_METRICS):
+            if "tol_abs" in rule:
+                new_val = st.number_input(f"{rule['label']} tol_abs",
+                                          value=float(rule["tol_abs"]), step=1.0, key=f"tol_abs_loc_{key}")
+                LOC_METRICS[i] = (key, {**rule, "tol_abs": new_val})
+            elif "tol_rel" in rule:
+                new_val = st.number_input(f"{rule['label']} tol_rel",
+                                          value=float(rule["tol_rel"]), step=0.005, format="%.3f", key=f"tol_rel_loc_{key}")
+                LOC_METRICS[i] = (key, {**rule, "tol_rel": new_val})
 
     run = st.button("Run Demo")
-
-with st.expander("What this puppet does"):
-    st.write("""
-    - **OM vs Realtor Δ%** and **OM vs Crexi Δ%** only (no market averages).
-    - **Color-coded** against each metric's tolerance (threshold scaled to the reference value).
-    - **Grouped** output tables: Unit Info, Location Data, Financials — like your screenshot.
-    - **OM rents are higher** than Realtor in the sample data to show noticeable deviations.
-    - **PDF** drag-and-drop prompt (no parsing in demo; plug in your parser later).
-    """)
 
 if run:
     om = parse_om(uploaded_pdf)
     crexi = fetch_crexi(query)
     realtor = fetch_realtor(query)
 
-    # GROUP 1: Unit Info
-    st.subheader("Unit Info")
-    df_unit = build_rows(om, crexi, realtor, "Unit Info")
-    st.dataframe(style_group_df(df_unit), use_container_width=True, hide_index=True)
+    # ---------- Property Summary ----------
+    st.subheader("Property Summary")
+    # Two-sentence blurb (example)
+    blurb = (
+        "123 Main St is a stabilized, garden-style multifamily asset located in a strong Tampa submarket "
+        "with improving fundamentals and steady household growth. The property presents immediate upside "
+        "via rent normalization to market and modest unit upgrades, with durable cash flow supported by "
+        "solid occupancy."
+    )
+    # Render key fields in a neat grid
+    cols = st.columns(3)
+    summary_map = {
+        "Address": om.get("address"),
+        "OZ Status": om.get("oz_status"),
+        "Avg Sq Ft / Unit": fmt_number("avg_sqft_per_type", om.get("avg_sqft_per_type")),
+        "NOI": fmt_money(om.get("noi")),
+        "Cap Rate": fmt_percent(om.get("cap_rate")),
+        "Asking Price": fmt_money(om.get("asking_price")),
+        "Expense Ratio": fmt_percent(om.get("expense_ratio")),
+    }
+    idx = 0
+    for label, value in summary_map.items():
+        with cols[idx % 3]:
+            st.markdown(f"**{label}**")
+            st.markdown(f"{value if value is not None else '—'}")
+        idx += 1
+    st.markdown(f"> {blurb}")
 
-    # GROUP 2: Location Data
-    st.subheader("Location Data")
-    df_loc = build_rows(om, crexi, realtor, "Location Data")
-    st.dataframe(style_group_df(df_loc), use_container_width=True, hide_index=True)
+    # ---------- Rent Table ----------
+    st.subheader("Unit Rents & GPR")
+    rent_df_raw = build_rent_df(om, realtor)
+    st.dataframe(style_rent_df(rent_df_raw), use_container_width=True, hide_index=True)
 
-    # GROUP 3: Financials
-    st.subheader("Financials")
-    df_fin = build_rows(om, crexi, realtor, "Financials")
-    st.dataframe(style_group_df(df_fin), use_container_width=True, hide_index=True)
+    # ---------- Location Data ----------
+    st.subheader("Location Data (Selected Comparisons)")
+    loc_df_raw = build_location_df(om, crexi, realtor)
+    st.dataframe(style_location_df(loc_df_raw), use_container_width=True, hide_index=True)
 
-    # Optional quick KPI: count how many OM metrics are within tolerance of each source
-    def kpis_against(source_name: str, ref_col: str, df_all: pd.DataFrame):
-        mask_num = df_all["_rule"].apply(lambda r: r["type"] == "num")
-        subset = df_all[mask_num]
-        within, total = 0, 0
-        for _, row in subset.iterrows():
-            dev = pct_dev_from_ref(row["OM"], row[ref_col])
-            t = threshold_pct_vs_ref(row["_rule"], row[ref_col])
-            if dev is not None:
-                total += 1
-                if abs(dev) <= t:
-                    within += 1
-        return within, total
-
-    st.markdown("---")
-    c1, c2 = st.columns(2)
-    with c1:
-        w, t = kpis_against("Realtor", "Realtor", pd.concat([df_unit, df_loc, df_fin], ignore_index=True))
-        st.metric("OM within tolerance vs Realtor", f"{w}/{t}")
-    with c2:
-        w, t = kpis_against("Crexi", "Crexi", pd.concat([df_unit, df_loc, df_fin], ignore_index=True))
-        st.metric("OM within tolerance vs Crexi", f"{w}/{t}")
 else:
-    st.info("Drag & drop an OM **PDF** (optional), set a query, adjust tolerances, then click **Run Demo**.")
+    st.info("Drag & drop an OM **PDF** (optional), set a query, adjust tolerances (expand the panel), then click **Run Demo**.")
