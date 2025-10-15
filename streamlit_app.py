@@ -20,21 +20,16 @@ def try_float(x):
 
 def parse_om(uploaded_pdf) -> Dict[str, Any]:
     """
-    Puppet OM parser.
-    For this demo we don't parse the PDF; we return a sample OM with rents higher than Realtor.
-    Swap with your real PDF parser later.
+    Puppet OM parser (PDF upload ignored; replace with real parser later).
+    OM rents intentionally high vs Realtor for demo.
     """
     return {
         "address": "123 Main St, Tampa, FL",
-        # Unit Info (rents high vs Realtor for demo)
-        "avg_rent_1bd": 1650,  # realtor 1525
-        "units_1bd": 31,
-        "avg_rent_2bd": 2100,  # realtor 1935
-        "units_2bd": 52,
-        "avg_rent_3bd": 2450,  # realtor 2260
-        "units_3bd": 29,
-        "avg_rent_4bd": 2800,  # realtor 2550
-        "units_4bd": 8,
+        # Unit Info (rents high vs Realtor)
+        "avg_rent_1bd": 1650, "units_1bd": 31,
+        "avg_rent_2bd": 2100, "units_2bd": 52,
+        "avg_rent_3bd": 2450, "units_3bd": 29,
+        "avg_rent_4bd": 2800, "units_4bd": 8,
         "avg_sqft_per_type": 920,
 
         # Location Data
@@ -60,10 +55,7 @@ def fetch_crexi(query: str, mock: Optional[Dict[str, Any]] = None) -> Dict[str, 
         "avg_rent_2bd": 1970,
         "avg_rent_3bd": 2280,
         "avg_rent_4bd": 2580,
-        "units_1bd": 32,
-        "units_2bd": 48,
-        "units_3bd": 30,
-        "units_4bd": 10,
+        "units_1bd": 32, "units_2bd": 48, "units_3bd": 30, "units_4bd": 10,
         "avg_sqft_per_type": 910,
 
         "lot_size": 1.70,
@@ -83,14 +75,12 @@ def fetch_realtor(query: str, mock: Optional[Dict[str, Any]] = None) -> Dict[str
         return mock
     return {
         "address": query or "123 Main St, Tampa, FL",
-        "avg_rent_1bd": 1525,
-        "avg_rent_2bd": 1935,
-        "avg_rent_3bd": 2260,
-        "avg_rent_4bd": 2550,
-        "units_1bd": 29,
-        "units_2bd": 49,
+        "avg_rent_1bd": 1525, "avg_rent_2bd": 1935,
+        "avg_rent_3bd": 2260, "avg_rent_4bd": 2550,
+        "units_1bd": 29, "units_2bd": 49,
         "total_units": 118,
         "asking_price": 33_500_000,
+        # realtor often lacks NOI / sqft; that's fine for the demo
     }
 
 # ======================
@@ -104,18 +94,26 @@ RENT_METRICS = {
     "4bd": {"rent_key": "avg_rent_4bd", "units_key": "units_4bd", "label": "4 Bed", "tol_abs": 120},
 }
 
-# Location Data — only these are compared (vs Crexi only)
+# Location Data — only these compared (vs Crexi only)
 LOC_METRICS: List[Tuple[str, Dict[str, Any]]] = [
     ("total_units",         {"label": "Total Units",              "type": "num", "tol_abs": 2}),
     ("lot_size",            {"label": "Lot Size (acres)",         "type": "num", "tol_rel": 0.10}),
-    ("year_built_or_renov", {"label": "Year Built / Renovated",   "type": "year"}),  # special categorization
+    ("year_built_or_renov", {"label": "Year Built / Renovated",   "type": "year"}),  # special
     ("rentable_sqft",       {"label": "Rentable Sq. Ft.",         "type": "num", "tol_rel": 0.05}),
 ]
 
 NO_COMMA_KEYS = {"year_built_or_renov"}
 
+# Tolerances for plot spreads
+TOL_AVG_SQFT_ABS = 50.0  # vs Realtor
+TOL_NOI_REL = 0.05       # vs Crexi
+TOL_PRICE_REL = 0.03     # vs Crexi
+
+# Mock: % of similar properties that are OZ (puppet number)
+MOCK_OZ_MARKET_PCT = 0.22
+
 # ======================
-# Formatting + tolerance helpers
+# Formatting + helpers
 # ======================
 def fmt_money(x):
     if isinstance(x, (int, float)):
@@ -168,25 +166,26 @@ def color_by_dev(dev: Optional[float], thresh: float) -> str:
         return "#ff9800"
     return "red"
 
-# Age category for year_built_or_renov (based on current year)
+def signed_pct(x: Optional[float]) -> str:
+    if not isinstance(x, (int, float)):
+        return "—"
+    sign = "+" if x >= 0 else "−"
+    return f"{sign}{abs(x)*100:.1f}%"
+
 def year_age_category(year_val: Optional[float]) -> str:
     if not isinstance(year_val, (int, float)):
         return "—"
     y = int(year_val)
     current_year = datetime.now().year
     age = max(0, current_year - y)
-    if age <= 5:
-        return "Very New"
-    if age <= 15:
-        return "New"
-    if age <= 30:
-        return "Standard"
-    if age <= 50:
-        return "Old"
+    if age <= 5: return "Very New"
+    if age <= 15: return "New"
+    if age <= 30: return "Standard"
+    if age <= 50: return "Old"
     return "Very Old"
 
 # ======================
-# Rent table (Units # | Avg Rent | GPR) with Realtor value + OM vs avg Δ%
+# Rent table (Units # | Avg Rent | GPR) with Realtor value + signed OM vs avg Δ%
 # ======================
 def build_rent_df(om: Dict[str, Any], realtor: Dict[str, Any]) -> pd.DataFrame:
     rows = []
@@ -209,8 +208,7 @@ def build_rent_df(om: Dict[str, Any], realtor: Dict[str, Any]) -> pd.DataFrame:
         thresh = threshold_pct_vs_ref(tol_abs, None, avg_rent)
 
         # GPRs (annual) using OM units always
-        gpr_om = None
-        gpr_r  = None
+        gpr_om = gpr_r = None
         if isinstance(om_units, (int, float)):
             if isinstance(om_rent, (int, float)):
                 gpr_om = om_units * om_rent * 12
@@ -220,7 +218,7 @@ def build_rent_df(om: Dict[str, Any], realtor: Dict[str, Any]) -> pd.DataFrame:
         rows.append({
             "Unit Type": label,
             "Units #": int(om_units) if isinstance(om_units, (int, float)) else om_units,
-            # Show Realtor cash + OM vs avg % (text), and keep raw refs for styling
+            # Avg Rent shows Realtor cash + signed OM vs avg %
             "Avg Rent": (r_rent, dev_vs_avg, avg_rent, tol_abs),
             "GPR": (gpr_om, gpr_r),
         })
@@ -232,13 +230,13 @@ def style_rent_df(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
     # Format units
     show["Units #"] = show["Units #"].apply(lambda x: f"{int(x)}" if isinstance(x, (int, float)) else x)
 
-    # Format Avg Rent cell content
+    # Format Avg Rent content with sign
     def fmt_avg_rent(cell):
         if not isinstance(cell, tuple) or len(cell) < 4:
             return ""
         r_rent, dev_vs_avg, avg_rent, tol_abs = cell
         r_str = fmt_money(r_rent) if isinstance(r_rent, (int, float)) else "—"
-        d_str = f"{dev_vs_avg*100:.1f}%" if isinstance(dev_vs_avg, (int, float)) else "—"
+        d_str = signed_pct(dev_vs_avg)
         return f"R: {r_str} | OM vs avg: {d_str}"
 
     show["Avg Rent"] = show["Avg Rent"].apply(fmt_avg_rent)
@@ -256,15 +254,11 @@ def style_rent_df(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
 
     styler = show[["Unit Type", "Units #", "Avg Rent", "GPR"]].style
 
-    # Left color bar on Avg Rent cell based on OM vs avg Δ%
+    # Left color bar on Avg Rent cell based on OM vs avg Δ% (signed)
     def left_bar_styles():
         styles = []
         for _, row in df.iterrows():
-            cell = row["Avg Rent"]
-            if not isinstance(cell, tuple) or len(cell) < 4:
-                styles.append("")
-                continue
-            r_rent, dev_vs_avg, avg_rent, tol_abs = cell
+            r_rent, dev_vs_avg, avg_rent, tol_abs = row["Avg Rent"]
             thresh = threshold_pct_vs_ref(tol_abs, None, avg_rent)
             col = color_by_dev(dev_vs_avg, thresh)
             if col:
@@ -275,14 +269,14 @@ def style_rent_df(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
 
     styler = styler.apply(lambda _: left_bar_styles(), axis=0, subset=["Avg Rent"])
 
-    # Zebra for readability
+    # Zebra
     styler = styler.set_properties(**{"border-color": "#ddd"}) \
                    .set_table_styles([{"selector": "tbody tr:nth-child(even)",
                                        "props": [("background-color", "#fafafa")]}])
     return styler
 
 # ======================
-# Location data table (only selected metrics; compare vs Crexi only)
+# Location data table (selected metrics; compare vs Crexi only)
 # Year built shows an age category instead of Δ%
 # ======================
 def build_location_df(om: Dict[str, Any], crexi: Dict[str, Any]) -> pd.DataFrame:
@@ -303,8 +297,6 @@ def build_location_df(om: Dict[str, Any], crexi: Dict[str, Any]) -> pd.DataFrame
                 "Δ vs Crexi / Category": category,
                 "_key": key,
                 "_type": typ,
-                "_thresh": None,
-                "_dev": None,
             })
         else:
             tol_abs = rule.get("tol_abs", None)
@@ -315,40 +307,41 @@ def build_location_df(om: Dict[str, Any], crexi: Dict[str, Any]) -> pd.DataFrame
                 "Metric": label,
                 "OM": o,
                 "Crexi": c,
-                "Δ vs Crexi / Category": dev_c,
+                "Δ vs Crexi / Category": (dev_c, thresh_c),
                 "_key": key,
                 "_type": typ,
-                "_thresh": thresh_c,
-                "_dev": dev_c,
             })
     return pd.DataFrame(rows)
 
 def style_location_df(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
     show = df.copy()
 
-    # Format OM/Crexi values
+    # Format values and Δ / Category
+    def fmt_delta(cell):
+        if isinstance(cell, tuple) and len(cell) == 2:
+            dev, _ = cell
+            return signed_pct(dev)
+        return cell  # category string
+
     for i, row in df.iterrows():
         key = row["_key"]
         show.at[i, "OM"] = fmt_number(key, row["OM"])
         show.at[i, "Crexi"] = fmt_number(key, row["Crexi"])
-
-        # Format the Δ / Category col
-        if row["_type"] == "year":
-            show.at[i, "Δ vs Crexi / Category"] = row["Δ vs Crexi / Category"]
-        else:
-            val = row["Δ vs Crexi / Category"]
-            show.at[i, "Δ vs Crexi / Category"] = f"{val*100:.1f}%" if isinstance(val, (int, float)) else "—"
+        show.at[i, "Δ vs Crexi / Category"] = fmt_delta(row["Δ vs Crexi / Category"])
 
     styler = show[["Metric", "OM", "Crexi", "Δ vs Crexi / Category"]].style
 
-    # Color only for numeric Δ% rows (not year category)
+    # Color numeric Δ% cells
     def colors_for_delta():
         out = []
         for _, row in df.iterrows():
-            if row["_type"] == "year":
-                out.append("")  # no color for category
+            cell = row["Δ vs Crexi / Category"]
+            raw = df.loc[_, "Δ vs Crexi / Category"]
+            if isinstance(raw, tuple) and len(raw) == 2:
+                dev, thr = raw
+                out.append(f"background-color: {color_by_dev(dev, thr)};")
             else:
-                out.append(f"background-color: {color_by_dev(row['_dev'], row['_thresh'])};")
+                out.append("")  # year category
         return out
 
     styler = styler.apply(lambda _: colors_for_delta(), axis=0, subset=["Δ vs Crexi / Category"])
@@ -359,36 +352,132 @@ def style_location_df(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
     return styler
 
 # ======================
-# Realtor-only rent box plots (four types on one figure)
+# Box plots (synthetic) sections
 # ======================
-def rent_boxplot_realtor(realtor: Dict[str, Any]) -> Optional[plt.Figure]:
-    data = []
-    labels = []
-    for k in RENT_KEYS:
-        conf = RENT_METRICS[k]
-        rent_key = conf["rent_key"]
-        tol_abs = conf["tol_abs"]
-        r = realtor.get(rent_key)
-        if isinstance(r, (int, float)):
-            # synthetic samples centered at Realtor rent with spread ~ tolerance
-            sigma = max(float(tol_abs), 1e-6)
-            samples = np.random.normal(loc=float(r), scale=sigma, size=400)
-            data.append(samples)
-            labels.append(conf["label"])
-    if not data:
+def _synthetic_samples(mu: float, sigma: float, n: int = 500) -> np.ndarray:
+    return np.random.normal(loc=float(mu), scale=max(float(sigma), 1e-6), size=n)
+
+def boxplot_single_series(data: np.ndarray, label: str, title: str, y_label: str) -> Optional[plt.Figure]:
+    if data.size == 0:
         return None
     fig = plt.figure()
-    plt.boxplot(data, labels=labels, showmeans=True)
-    plt.title("Realtor-only Rent Distributions by Unit Type")
-    plt.ylabel("Monthly Rent ($)")
+    plt.boxplot([data], labels=[label], showmeans=True)
+    plt.title(title)
+    plt.ylabel(y_label)
     plt.tight_layout()
     return fig
+
+def section_boxplot_avg_sqft(om: Dict[str, Any], realtor: Dict[str, Any]) -> Optional[plt.Figure]:
+    r = realtor.get("avg_sqft_per_type")
+    if not isinstance(r, (int, float)):
+        return None
+    samples = _synthetic_samples(r, TOL_AVG_SQFT_ABS)
+    return boxplot_single_series(samples, "Realtor", "Avg Sq Ft / Unit (Realtor-only)", "Sq Ft")
+
+def section_boxplot_price(om: Dict[str, Any], crexi: Dict[str, Any]) -> Optional[plt.Figure]:
+    c = crexi.get("asking_price")
+    if not isinstance(c, (int, float)):
+        return None
+    sigma = abs(c) * TOL_PRICE_REL
+    samples = _synthetic_samples(c, sigma)
+    return boxplot_single_series(samples, "Crexi", "Asking Price (Crexi-only)", "Price ($)")
+
+def section_boxplot_noi(om: Dict[str, Any], crexi: Dict[str, Any]) -> Optional[plt.Figure]:
+    c = crexi.get("noi")
+    if not isinstance(c, (int, float)):
+        return None
+    sigma = abs(c) * TOL_NOI_REL
+    samples = _synthetic_samples(c, sigma)
+    return boxplot_single_series(samples, "Crexi", "NOI (Crexi-only)", "NOI ($)")
+
+# ======================
+# CSV export (Metric, OM, Crexi, Realtor, Recommended)
+# ======================
+def recommended_value(metric: str, om_val, crexi_val, realtor_val) -> Optional[float]:
+    """
+    Rule of thumb:
+    - Rents & Avg Sq Ft -> lean on Realtor (0.7*Realtor + 0.3*OM)
+    - Asking Price & NOI -> lean on Crexi (0.7*Crexi + 0.3*OM)
+    - Else -> if Crexi present use (0.6*Crexi + 0.4*OM), elif Realtor present use (0.6*Realtor + 0.4*OM), else OM.
+    """
+    def wblend(ref, om, w=0.7):
+        if isinstance(ref, (int, float)) and isinstance(om, (int, float)):
+            return w*ref + (1-w)*om
+        return ref if isinstance(ref, (int, float)) else om if isinstance(om, (int, float)) else None
+
+    if metric in ["avg_rent_1bd","avg_rent_2bd","avg_rent_3bd","avg_rent_4bd","avg_sqft_per_type"]:
+        return wblend(realtor_val, om_val, 0.7)
+    if metric in ["asking_price","noi"]:
+        return wblend(crexi_val, om_val, 0.7)
+    # fallback
+    if isinstance(crexi_val, (int,float)):
+        return wblend(crexi_val, om_val, 0.6)
+    if isinstance(realtor_val, (int,float)):
+        return wblend(realtor_val, om_val, 0.6)
+    return om_val if isinstance(om_val, (int,float)) else None
+
+def build_export_rows(om: Dict[str, Any], crexi: Dict[str, Any], realtor: Dict[str, Any]) -> pd.DataFrame:
+    metrics = [
+        # Rents
+        "avg_rent_1bd","avg_rent_2bd","avg_rent_3bd","avg_rent_4bd",
+        # Location summary & key comps
+        "avg_sqft_per_type","total_units","lot_size","year_built_or_renov","rentable_sqft",
+        # Financials
+        "asking_price","noi","cap_rate","expense_ratio"
+    ]
+    labels = {
+        "avg_rent_1bd":"Avg Rent (1 Bed)","avg_rent_2bd":"Avg Rent (2 Bed)",
+        "avg_rent_3bd":"Avg Rent (3 Bed)","avg_rent_4bd":"Avg Rent (4 Bed)",
+        "avg_sqft_per_type":"Avg Sq Ft / Unit","total_units":"Total Units","lot_size":"Lot Size (acres)",
+        "year_built_or_renov":"Year Built / Renovated","rentable_sqft":"Rentable Sq Ft",
+        "asking_price":"Asking Price","noi":"NOI","cap_rate":"Cap Rate","expense_ratio":"Expense Ratio"
+    }
+    rows = []
+    for m in metrics:
+        rec = recommended_value(m, om.get(m), crexi.get(m), realtor.get(m))
+        rows.append({
+            "Metric": labels[m],
+            "OM": om.get(m),
+            "Crexi": crexi.get(m),
+            "Realtor": realtor.get(m),
+            "Recommended": rec
+        })
+    return pd.DataFrame(rows)
+
+def format_export_df(df: pd.DataFrame]) -> pd.DataFrame:
+    out = df.copy()
+    for i, row in out.iterrows():
+        key = None
+        # find metric key by reverse map (not stored); infer from label map for formatting simplicity
+        # we'll format by guessing types based on label
+        label = row["Metric"]
+        val_cols = ["OM","Crexi","Realtor","Recommended"]
+        def fmt_auto(lbl, v):
+            if v is None or not isinstance(v, (int,float)): return v
+            if "Price" in lbl or lbl in ["NOI"]:
+                return fmt_money(v)
+            if "Cap Rate" in lbl or "Expense Ratio" in lbl:
+                return fmt_percent(v)
+            if "Year" in lbl:
+                return f"{int(v)}"
+            if "Sq Ft" in lbl:
+                return fmt_number("generic", v)
+            if "Rent" in lbl:
+                return fmt_money(v)
+            if "Units" in lbl:
+                return f"{int(v)}"
+            if "Lot Size" in lbl:
+                return fmt_number("generic", v)
+            return fmt_number("generic", v)
+        for c in val_cols:
+            out.at[i, c] = fmt_auto(label, row[c])
+    return out
 
 # ======================
 # UI
 # ======================
 st.title("🏗️ CRE Scraping Demo (Puppet)")
-st.caption("Property summary + rents (Realtor value & OM vs avg Δ%) and selected location comps (OM vs Crexi). PDF drag-and-drop; tolerances collapsed.")
+st.caption("Property summary + rent deviations (Realtor) & selected location comps (vs Crexi). Plus OZ market stat and three box-plot sections.")
 
 with st.sidebar:
     st.header("Controls")
@@ -396,22 +485,10 @@ with st.sidebar:
     uploaded_pdf = st.file_uploader("Drag & drop the OM **PDF** (optional)", type=["pdf"])
     st.markdown("**Note:** Demo doesn't parse the PDF; it uses sample OM values to show the flow.")
     with st.expander("Adjust tolerances", expanded=False):
-        # Rent tolerances
         for k in RENT_KEYS:
             conf = RENT_METRICS[k]
-            new_abs = st.number_input(f"{conf['label']} rent tol_abs ($)",
-                                      value=float(conf["tol_abs"]), step=5.0, key=f"tol_abs_rent_{k}")
-            RENT_METRICS[k]["tol_abs"] = new_abs
-        # Location tolerances (only those that use % or abs)
-        for i, (key, rule) in enumerate(LOC_METRICS):
-            if rule["type"] == "num" and "tol_abs" in rule:
-                new_val = st.number_input(f"{rule['label']} tol_abs",
-                                          value=float(rule["tol_abs"]), step=1.0, key=f"tol_abs_loc_{key}")
-                LOC_METRICS[i] = (key, {**rule, "tol_abs": new_val})
-            elif rule["type"] == "num" and "tol_rel" in rule:
-                new_val = st.number_input(f"{rule['label']} tol_rel",
-                                          value=float(rule["tol_rel"]), step=0.005, format="%.3f", key=f"tol_rel_loc_{key}")
-                LOC_METRICS[i] = (key, {**rule, "tol_rel": new_val})
+            conf["tol_abs"] = st.number_input(f"{conf['label']} rent tol_abs ($)",
+                                              value=float(conf["tol_abs"]), step=5.0, key=f"tol_abs_rent_{k}")
 
     run = st.button("Run Demo")
 
@@ -445,20 +522,46 @@ if run:
         idx += 1
     st.markdown(f"> {blurb}")
 
+    # OZ market stat (mock)
+    st.subheader("Market OZ Share")
+    st.write(f"Estimated **{fmt_percent(MOCK_OZ_MARKET_PCT)}** of comparable assets are located in Opportunity Zones.")
+    st.progress(min(1.0, max(0.0, MOCK_OZ_MARKET_PCT)))
+
     # ---------- Rent Table ----------
     st.subheader("Unit Rents & GPR")
     rent_df_raw = build_rent_df(om, realtor)
     st.dataframe(style_rent_df(rent_df_raw), use_container_width=True, hide_index=True)
 
-    # ---------- Realtor-only Rent Distributions ----------
-    fig = rent_boxplot_realtor(realtor)
-    if fig is not None:
-        st.pyplot(fig)
+    # ---------- Box Plot: Avg Sq Ft / Unit (Realtor) ----------
+    st.subheader("Avg Sq Ft / Unit — Realtor Box Plot")
+    fig_sqft = section_boxplot_avg_sqft(om, realtor)
+    if fig_sqft is not None:
+        st.pyplot(fig_sqft)
 
-    # ---------- Location Data ----------
+    # ---------- Box Plot: Asking Price (Crexi) ----------
+    st.subheader("Asking Price — Crexi Box Plot")
+    fig_price = section_boxplot_price(om, crexi)
+    if fig_price is not None:
+        st.pyplot(fig_price)
+
+    # ---------- Box Plot: NOI (Crexi) ----------
+    st.subheader("NOI — Crexi Box Plot")
+    fig_noi = section_boxplot_noi(om, crexi)
+    if fig_noi is not None:
+        st.pyplot(fig_noi)
+
+    # ---------- Location Data (Selected vs Crexi) ----------
     st.subheader("Location Data (Selected Comparisons vs Crexi)")
     loc_df_raw = build_location_df(om, crexi)
     st.dataframe(style_location_df(loc_df_raw), use_container_width=True, hide_index=True)
 
+    # ---------- CSV Export ----------
+    st.subheader("Download Comparison CSV")
+    export_df = build_export_rows(om, crexi, realtor)
+    pretty_export = format_export_df(export_df)
+    csv_bytes = pretty_export.to_csv(index=False).encode("utf-8")
+    st.download_button("Download CSV (OM, Crexi, Realtor, Recommended)",
+                       data=csv_bytes, file_name="compare_export.csv", mime="text/csv")
+
 else:
-    st.info("Drag & drop an OM **PDF** (optional), set a query, adjust tolerances (expand the panel), then click **Run Demo**.")
+    st.info("Drag & drop an OM **PDF** (optional), set a query, then click **Run Demo**.")
