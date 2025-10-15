@@ -444,7 +444,7 @@ def build_export_rows(om: Dict[str, Any], crexi: Dict[str, Any], realtor: Dict[s
         })
     return pd.DataFrame(rows)
 
-def format_export_df(df: pd.DataFrame]) -> pd.DataFrame:
+def format_export_df(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     for i, row in out.iterrows():
         key = None
