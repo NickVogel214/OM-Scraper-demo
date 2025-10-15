@@ -32,39 +32,51 @@ def parse_om(uploaded_pdf) -> Dict[str, Any]:
         "avg_rent_4bd": 2800, "units_4bd": 8,
         "avg_sqft_per_type": 920,
 
-        # Location Data
-        "lot_size": 1.85,
+        # Location Data (we compare only subset; year is summary-only)
+        "lot_size": 1.85,  # acres
         "year_built_or_renov": 2001,
         "rentable_sqft": 108_750,
         "oz_status": "No",
         "total_units": 120,
 
-        # Financials (summary-only)
+        # Financials (summary + financials table)
         "noi": 1_890_000,
         "cap_rate": 0.054,
         "asking_price": 34_250_000,
         "expense_ratio": 0.41,
+        # Vacancy often missing in OM → leave out; we’ll show area avg in financials
     }
 
 def fetch_crexi(query: str, mock: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Fields aligned to what you can pull from Crexi (per your list).
+    """
     if mock is not None:
         return mock
     return {
-        "address": query or "123 Main St, Tampa, FL",
-        "avg_rent_1bd": 1545, "avg_rent_2bd": 1970, "avg_rent_3bd": 2280, "avg_rent_4bd": 2580,
-        "units_1bd": 32, "units_2bd": 48, "units_3bd": 30, "units_4bd": 10,
+        "Property Link": "https://example.com/crexi/123",   # placeholder
+        "Property Name": "Main Street Flats",
+        "Property Status": "For Sale",
+        "Type": "Multifamily",
+        "Address": query or "123 Main St, Tampa, FL",
+        "City": "Tampa",
+        "State": "FL",
+        "Zip": "33602",
+        "SqFt": 107_200,            # rentable square feet
+        "Lot Size": 1.70,           # acres
+        "Units": 120,
+        "Price/Unit": 275_000,      # $/unit
+        "NOI": 1_825_000,
+        "Cap Rate": 0.056,
+        "Asking Price": 33_000_000,
+        "Price/SqFt": 308,          # $/sqft
+        "Price/Acre": 19_411_765,   # Asking / Lot Size
+        "Opportunity Zone": "No",
+        "Longitude": -82.4600,
+        "Latitude": 27.9500,
+        # Extra keys we also use elsewhere
         "avg_sqft_per_type": 910,
-
-        "lot_size": 1.70,
-        "year_built_or_renov": 1999,
-        "rentable_sqft": 107_200,
-        "oz_status": "No",
-        "total_units": 120,
-
-        "noi": 1_825_000,
-        "cap_rate": 0.056,
-        "asking_price": 33_000_000,
-        "expense_ratio": 0.40,
+        # (Rents not required from Crexi; rent comps use Realtor)
     }
 
 def fetch_realtor(query: str, mock: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -73,11 +85,12 @@ def fetch_realtor(query: str, mock: Optional[Dict[str, Any]] = None) -> Dict[str
     return {
         "address": query or "123 Main St, Tampa, FL",
         "avg_rent_1bd": 1525, "avg_rent_2bd": 1935, "avg_rent_3bd": 2260, "avg_rent_4bd": 2550,
-        "units_1bd": 29, "units_2bd": 49,
-        "total_units": 118,
-        "asking_price": 33_500_000,
-        # Added so Avg Sq Ft section populates
-        "avg_sqft_per_type": 900,
+        "units_1bd": 29, "units_2bd": 49, "total_units": 118,
+        "asking_price": 33_500_000,  # sometimes present; ok if missing
+        "avg_sqft_per_type": 900,    # added so “Avg Sq Ft / Unit” can be compared to Realtor
+        "lot_size": 1.68,            # sometimes available
+        "rentable_sqft": 106_900,    # sometimes available
+        "oz_status": "No",
     }
 
 # ======================
@@ -95,19 +108,14 @@ RENT_METRICS = {
 LOC_METRICS: List[Tuple[str, Dict[str, Any]]] = [
     ("total_units",         {"label": "Total Units",              "type": "num", "tol_abs": 2}),
     ("lot_size",            {"label": "Lot Size (acres)",         "type": "num", "tol_rel": 0.10}),
-    ("year_built_or_renov", {"label": "Year Built / Renovated",   "type": "year"}),  # special
+    # year_built is summary-only per your request
     ("rentable_sqft",       {"label": "Rentable Sq. Ft.",         "type": "num", "tol_rel": 0.05}),
 ]
 
 NO_COMMA_KEYS = {"year_built_or_renov"}
 
-# Tolerances for plot spreads
-TOL_AVG_SQFT_ABS = 50.0  # vs Realtor
-TOL_NOI_REL = 0.05       # vs Crexi
-TOL_PRICE_REL = 0.03     # vs Crexi
-
-# Mock: % of similar properties that are OZ (puppet number)
-MOCK_OZ_MARKET_PCT = 0.22
+# Vacancy area average (mock)
+AREA_AVG_VACANCY = 0.06
 
 # ======================
 # Formatting + helpers
@@ -168,18 +176,6 @@ def signed_pct(x: Optional[float]) -> str:
         return "—"
     sign = "+" if x >= 0 else "−"
     return f"{sign}{abs(x)*100:.1f}%"
-
-def year_age_category(year_val: Optional[float]) -> str:
-    if not isinstance(year_val, (int, float)):
-        return "—"
-    y = int(round(year_val))
-    current_year = datetime.now().year
-    age = max(0, current_year - y)
-    if age <= 5: return "Very New"
-    if age <= 15: return "New"
-    if age <= 30: return "Standard"
-    if age <= 50: return "Old"
-    return "Very Old"
 
 # ======================
 # Rent table (Units # | Avg Rent | GPR) with Realtor value + signed OM vs avg Δ%
@@ -272,7 +268,6 @@ def style_rent_df(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
 
 # ======================
 # Location data table (selected metrics; compare vs Crexi only)
-# Year built shows an age category instead of Δ%
 # ======================
 def build_location_df(om: Dict[str, Any], crexi: Dict[str, Any]) -> pd.DataFrame:
     rows = []
@@ -283,54 +278,43 @@ def build_location_df(om: Dict[str, Any], crexi: Dict[str, Any]) -> pd.DataFrame
         o = om.get(key)
         c = crexi.get(key)
 
-        if typ == "year":
-            category = year_age_category(o)
-            rows.append({
-                "Metric": label, "OM": o, "Crexi": c,
-                "Δ vs Crexi / Category": category, "_key": key, "_type": typ,
-            })
-        else:
-            tol_abs = rule.get("tol_abs", None)
-            tol_rel = rule.get("tol_rel", None)
-            dev_c = pct_dev_from_ref(o, c)
-            thresh_c = threshold_pct_vs_ref(tol_abs, tol_rel, c)
-            rows.append({
-                "Metric": label, "OM": o, "Crexi": c,
-                "Δ vs Crexi / Category": (dev_c, thresh_c), "_key": key, "_type": typ,
-            })
+        tol_abs = rule.get("tol_abs", None)
+        tol_rel = rule.get("tol_rel", None)
+        dev_c = pct_dev_from_ref(o, c)
+        thresh_c = threshold_pct_vs_ref(tol_abs, tol_rel, c)
+        rows.append({
+            "Metric": label,
+            "OM": o,
+            "Crexi": c,
+            "Δ vs Crexi": (dev_c, thresh_c),
+            "_key": key,
+            "_type": typ,
+        })
     return pd.DataFrame(rows)
 
 def style_location_df(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
     show = df.copy()
 
-    # Format values and Δ / Category
-    def fmt_delta(cell):
-        if isinstance(cell, tuple) and len(cell) == 2:
-            dev, _ = cell
-            return signed_pct(dev)
-        return cell  # category string
-
+    # Format values and Δ
     for i, row in df.iterrows():
         key = row["_key"]
         show.at[i, "OM"] = fmt_number(key, row["OM"])
+        # map to crexi keys where names differ
         show.at[i, "Crexi"] = fmt_number(key, row["Crexi"])
-        show.at[i, "Δ vs Crexi / Category"] = fmt_delta(row["Δ vs Crexi / Category"])
+        dev, _ = row["Δ vs Crexi"]
+        show.at[i, "Δ vs Crexi"] = signed_pct(dev)
 
-    styler = show[["Metric", "OM", "Crexi", "Δ vs Crexi / Category"]].style
+    styler = show[["Metric", "OM", "Crexi", "Δ vs Crexi"]].style
 
     # Color numeric Δ% cells
     def colors_for_delta():
         out = []
-        for idx, row in df.iterrows():
-            cell = row["Δ vs Crexi / Category"]
-            if isinstance(cell, tuple) and len(cell) == 2:
-                dev, thr = cell
-                out.append(f"background-color: {color_by_dev(dev, thr)};")
-            else:
-                out.append("")  # year category
+        for _, row in df.iterrows():
+            dev, thr = row["Δ vs Crexi"]
+            out.append(f"background-color: {color_by_dev(dev, thr)};")
         return out
 
-    styler = styler.apply(lambda _: colors_for_delta(), axis=0, subset=["Δ vs Crexi / Category"])
+    styler = styler.apply(lambda _: colors_for_delta(), axis=0, subset=["Δ vs Crexi"])
 
     styler = styler.set_properties(**{"border-color": "#ddd"}) \
                    .set_table_styles([{"selector": "tbody tr:nth-child(even)",
@@ -338,176 +322,136 @@ def style_location_df(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
     return styler
 
 # ======================
-# Plot theming utilities (compact, centered, dark)
+# Financials table
 # ======================
-def themed_boxplot(data: List[np.ndarray], labels: List[str], title: str, y_label: str) -> Optional[plt.Figure]:
-    if not data:
-        return None
-    fig, ax = plt.subplots(figsize=(5, 3), dpi=175)
-    fig.patch.set_facecolor('black')
-    ax.set_facecolor('black')
+def compute_price_metrics(asking: Optional[float], sqft: Optional[float], units: Optional[float], acres: Optional[float]):
+    price_per_sqft = asking / sqft if isinstance(asking, (int,float)) and isinstance(sqft, (int,float)) and sqft != 0 else None
+    price_per_unit = asking / units if isinstance(asking, (int,float)) and isinstance(units, (int,float)) and units != 0 else None
+    price_per_acre = asking / acres if isinstance(asking, (int,float)) and isinstance(acres, (int,float)) and acres != 0 else None
+    return price_per_sqft, price_per_unit, price_per_acre
 
-    # boxplot styling
-    bp = ax.boxplot(data, labels=labels, showmeans=True, patch_artist=True)
-    for box in bp['boxes']:
-        box.set(facecolor='black', edgecolor='white', linewidth=1.0)
-    for whisker in bp['whiskers']:
-        whisker.set(color='white', linewidth=1.0)
-    for cap in bp['caps']:
-        cap.set(color='white', linewidth=1.0)
-    for median in bp['medians']:
-        median.set(color='#00e5ff', linewidth=1.2)  # cyan-ish for medians
-    if 'means' in bp:
-        for mean in bp['means']:
-            mean.set(color='white', marker='o', markersize=3)
+def build_financials_table(om: Dict[str, Any], crexi: Dict[str, Any]) -> pd.DataFrame:
+    # Base values
+    om_price = om.get("asking_price")
+    cx_price = crexi.get("Asking Price")
+    om_noi   = om.get("noi")
+    cx_noi   = crexi.get("NOI")
+    om_cap   = om.get("cap_rate")
+    cx_cap   = crexi.get("Cap Rate")
 
-    ax.tick_params(colors='white')
-    ax.set_title(title, color='white', pad=6)
-    ax.set_ylabel(y_label, color='white')
-    fig.tight_layout()
-    return fig
+    # SqFt, Units, Lot Size
+    om_sqft  = om.get("rentable_sqft")
+    cx_sqft  = crexi.get("SqFt")
+    om_units = om.get("total_units")
+    cx_units = crexi.get("Units")
+    om_acres = om.get("lot_size")
+    cx_acres = crexi.get("Lot Size")
 
-# Sections
-def rent_boxplot_realtor(realtor: Dict[str, Any]) -> Optional[plt.Figure]:
-    data, labels = [], []
-    for k in RENT_KEYS:
-        conf = RENT_METRICS[k]
-        rent_key = conf["rent_key"]
-        tol_abs = conf["tol_abs"]
-        r = realtor.get(rent_key)
-        if isinstance(r, (int, float)):
-            sigma = max(float(tol_abs), 1e-6)
-            samples = np.random.normal(loc=float(r), scale=sigma, size=400)
-            data.append(samples)
-            labels.append(conf["label"])
-    return themed_boxplot(data, labels, "Realtor-only Rents (by Unit Type)", "Monthly Rent ($)")
+    # Derived
+    om_pps, om_ppu, om_ppa = compute_price_metrics(om_price, om_sqft, om_units, om_acres)
+    cx_pps, cx_ppu, cx_ppa = compute_price_metrics(cx_price, cx_sqft, cx_units, cx_acres)
 
-def section_boxplot_avg_sqft(om: Dict[str, Any], realtor: Dict[str, Any]) -> Optional[plt.Figure]:
-    r = realtor.get("avg_sqft_per_type")
-    if not isinstance(r, (int, float)):
-        return None
-    data = [np.random.normal(loc=float(r), scale=TOL_AVG_SQFT_ABS, size=400)]
-    labels = ["Realtor"]
-    return themed_boxplot(data, labels, "Avg Sq Ft / Unit (Realtor)", "Sq Ft")
+    def dev(a, b):  # signed percent (OM vs Crexi)
+        return pct_dev_from_ref(a, b)
 
-def section_boxplot_price(crexi: Dict[str, Any]) -> Optional[plt.Figure]:
-    c = crexi.get("asking_price")
-    if not isinstance(c, (int, float)):
-        return None
-    sigma = abs(c) * TOL_PRICE_REL
-    data = [np.random.normal(loc=float(c), scale=sigma, size=400)]
-    labels = ["Crexi"]
-    return themed_boxplot(data, labels, "Asking Price (Crexi)", "Price ($)")
-
-def section_boxplot_noi(crexi: Dict[str, Any]) -> Optional[plt.Figure]:
-    c = crexi.get("noi")
-    if not isinstance(c, (int, float)):
-        return None
-    sigma = abs(c) * TOL_NOI_REL
-    data = [np.random.normal(loc=float(c), scale=sigma, size=400)]
-    labels = ["Crexi"]
-    return themed_boxplot(data, labels, "NOI (Crexi)", "NOI ($)")
-
-# ======================
-# CSV export (Metric, OM, Crexi, Realtor, Recommended)
-# ======================
-def recommended_value(metric: str, om_val, crexi_val, realtor_val) -> Optional[float]:
-    """
-    Rule of thumb:
-    - Rents & Avg Sq Ft -> lean on Realtor (0.7*Realtor + 0.3*OM)
-    - Asking Price & NOI -> lean on Crexi (0.7*Crexi + 0.3*OM)
-    - Else -> if Crexi present use (0.6*Crexi + 0.4*OM), elif Realtor present use (0.6*Realtor + 0.4*OM), else OM.
-    """
-    def wblend(ref, om, w=0.7):
-        if isinstance(ref, (int, float)) and isinstance(om, (int, float)):
-            return w*ref + (1-w)*om
-        return ref if isinstance(ref, (int, float)) else om if isinstance(om, (int, float)) else None
-
-    if metric in ["avg_rent_1bd","avg_rent_2bd","avg_rent_3bd","avg_rent_4bd","avg_sqft_per_type"]:
-        return wblend(realtor_val, om_val, 0.7)
-    if metric in ["asking_price","noi"]:
-        return wblend(crexi_val, om_val, 0.7)
-    # fallback
-    if isinstance(crexi_val, (int,float)):
-        return wblend(crexi_val, om_val, 0.6)
-    if isinstance(realtor_val, (int,float)):
-        return wblend(realtor_val, om_val, 0.6)
-    return om_val if isinstance(om_val, (int,float)) else None
-
-def build_export_rows(om: Dict[str, Any], crexi: Dict[str, Any], realtor: Dict[str, Any]) -> pd.DataFrame:
-    metrics = [
-        # Rents
-        "avg_rent_1bd","avg_rent_2bd","avg_rent_3bd","avg_rent_4bd",
-        # Location summary & key comps
-        "avg_sqft_per_type","total_units","lot_size","year_built_or_renov","rentable_sqft",
-        # Financials
-        "asking_price","noi","cap_rate","expense_ratio"
+    rows = [
+        ("Asking Price",      om_price, cx_price, dev(om_price, cx_price), fmt_money),
+        ("Cap Rate",          om_cap,   cx_cap,   dev(om_cap,   cx_cap),   fmt_percent),
+        ("NOI",               om_noi,   cx_noi,   dev(om_noi,   cx_noi),   fmt_money),
+        ("Price/SqFt",        om_pps,   cx_pps,   dev(om_pps,   cx_pps),   lambda v: fmt_money(v) if isinstance(v, (int,float)) else v),
+        ("Price/Unit",        om_ppu,   cx_ppu,   dev(om_ppu,   cx_ppu),   fmt_money),
+        ("Price/Acre",        om_ppa,   cx_ppa,   dev(om_ppa,   cx_ppa),   fmt_money),
+        ("Vacancy (Area Avg)", None,    AREA_AVG_VACANCY, None,            fmt_percent),
     ]
-    labels = {
-        "avg_rent_1bd":"Avg Rent (1 Bed)","avg_rent_2bd":"Avg Rent (2 Bed)",
-        "avg_rent_3bd":"Avg Rent (3 Bed)","avg_rent_4bd":"Avg Rent (4 Bed)",
-        "avg_sqft_per_type":"Avg Sq Ft / Unit","total_units":"Total Units","lot_size":"Lot Size (acres)",
-        "year_built_or_renov":"Year Built / Renovated","rentable_sqft":"Rentable Sq Ft",
-        "asking_price":"Asking Price","noi":"NOI","cap_rate":"Cap Rate","expense_ratio":"Expense Ratio"
-    }
+    df = pd.DataFrame(rows, columns=["Metric", "OM", "Crexi Avg", "Deviation", "_fmt"])
+    return df
+
+def style_financials_df(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
+    show = df.copy()
+    # Format OM & Crexi columns by row-specific formatter
+    for i, row in df.iterrows():
+        f = row["_fmt"]
+        show.at[i, "OM"] = f(row["OM"]) if callable(f) else row["OM"]
+        show.at[i, "Crexi Avg"] = f(row["Crexi Avg"]) if callable(f) else row["Crexi Avg"]
+        show.at[i, "Deviation"] = signed_pct(row["Deviation"])
+
+    styler = show[["Metric", "OM", "Crexi Avg", "Deviation"]].style
+
+    # Color deviation cells (skip None e.g., Vacancy)
+    def colors_for_delta():
+        out = []
+        for _, row in df.iterrows():
+            d = row["Deviation"]
+            if isinstance(d, (int, float)):
+                out.append(f"background-color: {color_by_dev(d, 0.05)};")  # default 5% band
+            else:
+                out.append("")
+        return out
+
+    styler = styler.apply(lambda _: colors_for_delta(), axis=0, subset=["Deviation"])
+    styler = styler.set_properties(**{"border-color": "#ddd"}) \
+                   .set_table_styles([{"selector": "tbody tr:nth-child(even)",
+                                       "props": [("background-color", "#fafafa")]}])
+    return styler
+
+# ======================
+# “All Metrics” combined table (OM, Crexi, Realtor)
+# ======================
+def build_all_metrics_table(om: Dict[str, Any], crexi: Dict[str, Any], realtor: Dict[str, Any]) -> pd.DataFrame:
+    # Map into consistent keys
     rows = []
-    for m in metrics:
-        rows.append({
-            "Metric": labels[m],
-            "OM": om.get(m),
-            "Crexi": crexi.get(m),
-            "Realtor": realtor.get(m),
-            "Recommended": recommended_value(m, om.get(m), crexi.get(m), realtor.get(m)),
-        })
-    return pd.DataFrame(rows)
 
-def format_export_df(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    for i, row in out.iterrows():
-        label = row["Metric"]
-        val_cols = ["OM","Crexi","Realtor","Recommended"]
+    def add_row(name, om_key=None, cx_key=None, r_key=None, fmt=None):
+        om_val = om.get(om_key) if om_key else None
+        cx_val = crexi.get(cx_key) if cx_key else None
+        r_val  = realtor.get(r_key) if r_key else None
+        rows.append([name,
+                     fmt(om_val) if (fmt and isinstance(om_val, (int,float))) else om_val,
+                     fmt(cx_val) if (fmt and isinstance(cx_val, (int,float))) else cx_val,
+                     fmt(r_val)  if (fmt and isinstance(r_val,  (int,float))) else r_val])
 
-        def fmt_auto(lbl, v):
-            # leave non-numeric as-is
-            if v is None or not isinstance(v, (int, float)):
-                return v
-            # money-like
-            if "Price" in lbl or lbl in ["NOI"]:
-                return fmt_money(v)
-            # percents
-            if "Cap Rate" in lbl or "Expense Ratio" in lbl:
-                return fmt_percent(v)
-            # year
-            if "Year" in lbl:
-                return f"{int(round(v))}"
-            # counts & sizes
-            if "Units" in lbl:
-                return f"{int(round(v))}"
-            if "Sq Ft" in lbl:
-                return fmt_number("generic", v)
-            if "Lot Size" in lbl:
-                return fmt_number("generic", v)
-            # rents
-            if "Rent" in lbl:
-                return fmt_money(v)
-            return fmt_number("generic", v)
+    # Summary-ish
+    add_row("Address", "address", "Address", "address", None)
+    add_row("OZ Status", "oz_status", "Opportunity Zone", "oz_status", None)
+    add_row("Total Units", "total_units", "Units", "total_units", lambda v: f"{int(round(v))}")
+    add_row("Rentable Sq Ft", "rentable_sqft", "SqFt", "rentable_sqft", lambda v: f"{int(round(v)):,}")
+    add_row("Avg Sq Ft / Unit", "avg_sqft_per_type", "avg_sqft_per_type", "avg_sqft_per_type", lambda v: f"{int(round(v)):,}")
+    add_row("Lot Size (acres)", "lot_size", "Lot Size", "lot_size", lambda v: f"{v:.2f}")
 
-        for c in val_cols:
-            out.at[i, c] = fmt_auto(label, row[c])
-    return out
+    # Financials
+    add_row("Asking Price", "asking_price", "Asking Price", "asking_price", lambda v: fmt_money(v))
+    add_row("NOI", "noi", "NOI", None, lambda v: fmt_money(v))
+    add_row("Cap Rate", "cap_rate", "Cap Rate", None, lambda v: fmt_percent(v))
+    add_row("Expense Ratio", "expense_ratio", None, None, lambda v: fmt_percent(v))
+
+    # Rents (OM/Realtor)
+    add_row("Avg Rent (1 Bed)", "avg_rent_1bd", None, "avg_rent_1bd", lambda v: fmt_money(v))
+    add_row("Avg Rent (2 Bed)", "avg_rent_2bd", None, "avg_rent_2bd", lambda v: fmt_money(v))
+    add_row("Avg Rent (3 Bed)", "avg_rent_3bd", None, "avg_rent_3bd", lambda v: fmt_money(v))
+    add_row("Avg Rent (4 Bed)", "avg_rent_4bd", None, "avg_rent_4bd", lambda v: fmt_money(v))
+
+    # Derived price metrics
+    om_pps, om_ppu, om_ppa = compute_price_metrics(om.get("asking_price"), om.get("rentable_sqft"), om.get("total_units"), om.get("lot_size"))
+    cx_pps, cx_ppu, cx_ppa = compute_price_metrics(crexi.get("Asking Price"), crexi.get("SqFt"), crexi.get("Units"), crexi.get("Lot Size"))
+    add_row("Price/SqFt", None, None, None, None); rows[-1][1] = fmt_money(om_pps) if om_pps else None; rows[-1][2] = fmt_money(cx_pps) if cx_pps else None
+    add_row("Price/Unit", None, None, None, None); rows[-1][1] = fmt_money(om_ppu) if om_ppu else None; rows[-1][2] = fmt_money(cx_ppu) if cx_ppu else None
+    add_row("Price/Acre", None, None, None, None); rows[-1][1] = fmt_money(om_ppa) if om_ppa else None; rows[-1][2] = fmt_money(cx_ppa) if cx_ppa else None
+
+    df = pd.DataFrame(rows, columns=["Metric", "OM", "Crexi", "Realtor"])
+    return df
 
 # ======================
 # UI
 # ======================
 st.title("🏗️ CRE Scraping Demo (Puppet)")
-st.caption("Property summary + rents (Realtor) & selected location comps (vs Crexi). Compact dark box plots; downloadable CSV with recommended values.")
+st.caption("Property summary, rent table (Realtor comps), selected location comps (vs Crexi), Financials, and an all-metrics rollup. PDF drag-and-drop; tolerances collapsed.")
 
 with st.sidebar:
     st.header("Controls")
     query = st.text_input("Search query / address", "123 Main St, Tampa, FL")
     uploaded_pdf = st.file_uploader("Drag & drop the OM **PDF** (optional)", type=["pdf"])
     st.markdown("**Note:** Demo doesn't parse the PDF; it uses sample OM values to show the flow.")
-    with st.expander("Adjust tolerances", expanded=False):
+    with st.expander("Adjust rent tolerances", expanded=False):
         for k in RENT_KEYS:
             conf = RENT_METRICS[k]
             conf["tol_abs"] = st.number_input(f"{conf['label']} rent tol_abs ($)",
@@ -531,11 +475,12 @@ if run:
     summary_map = {
         "Address": om.get("address"),
         "OZ Status": om.get("oz_status"),
-        "Avg Sq Ft / Unit": fmt_number("avg_sqft_per_type", om.get("avg_sqft_per_type")),
-        "NOI": fmt_money(om.get("noi")),
         "Cap Rate": fmt_percent(om.get("cap_rate")),
+        "Rentable Sq Ft": f"{int(round(om.get('rentable_sqft'))):,}" if isinstance(om.get("rentable_sqft"), (int,float)) else "—",
+        "Avg Sq Ft / Unit": f"{int(round(om.get('avg_sqft_per_type'))):,}" if isinstance(om.get("avg_sqft_per_type"), (int,float)) else "—",
         "Asking Price": fmt_money(om.get("asking_price")),
-        "Expense Ratio": fmt_percent(om.get("expense_ratio")),
+        # Year built is summary-only per your instruction
+        "Year Built / Renovated": f"{int(round(om.get('year_built_or_renov')))}" if isinstance(om.get("year_built_or_renov"), (int,float)) else "—",
     }
     idx = 0
     for label, value in summary_map.items():
@@ -545,56 +490,48 @@ if run:
         idx += 1
     st.markdown(f"> {blurb}")
 
-    # OZ market stat (mock)
-    st.subheader("Market OZ Share")
-    st.write(f"Estimated **{fmt_percent(MOCK_OZ_MARKET_PCT)}** of comparable assets are located in Opportunity Zones.")
-    st.progress(min(1.0, max(0.0, MOCK_OZ_MARKET_PCT)))
-
     # ---------- Rent Table ----------
-    st.subheader("Unit Rents & GPR")
+    st.subheader("Unit Rents & GPR (OM vs Realtor)")
     rent_df_raw = build_rent_df(om, realtor)
     st.dataframe(style_rent_df(rent_df_raw), use_container_width=True, hide_index=True)
 
-    # ---------- Realtor-only Rent Distributions (compact, centered) ----------
-    fig_rents = rent_boxplot_realtor(realtor)
-    if fig_rents is not None:
+    # ---------- (Optional tiny) Realtor-only rent distributions below the rent table ----------
+    # If you truly want zero plots, comment this block out.
+    data, labels = [], []
+    for k in RENT_KEYS:
+        conf = RENT_METRICS[k]
+        r = realtor.get(conf["rent_key"])
+        if isinstance(r, (int,float)):
+            sigma = max(float(conf["tol_abs"]), 1e-6)
+            data.append(np.random.normal(r, sigma, 320))
+            labels.append(conf["label"])
+    if data:
+        # compact, subtle styling so it doesn't take space
+        fig, ax = plt.subplots(figsize=(5, 2.5), dpi=150)
+        bp = ax.boxplot(data, labels=labels, showmeans=True, patch_artist=True)
+        for box in bp['boxes']:
+            box.set(facecolor='white', edgecolor='black', linewidth=1.0)
+        ax.set_title("Realtor Rent Distributions (by Unit Type)", pad=6)
+        ax.set_ylabel("Rent ($)")
+        fig.tight_layout()
         _, mid, _ = st.columns([1,2,1])
         with mid:
-            st.pyplot(fig_rents, use_container_width=False)
-
-    # ---------- Avg Sq Ft / Unit — Realtor Box Plot (compact, centered) ----------
-    fig_sqft = section_boxplot_avg_sqft(om, realtor)
-    if fig_sqft is not None:
-        _, mid, _ = st.columns([1,2,1])
-        with mid:
-            st.pyplot(fig_sqft, use_container_width=False)
-
-    # ---------- Asking Price — Crexi Box Plot (compact, centered) ----------
-    fig_price = section_boxplot_price(crexi)
-    if fig_price is not None:
-        _, mid, _ = st.columns([1,2,1])
-        with mid:
-            st.pyplot(fig_price, use_container_width=False)
-
-    # ---------- NOI — Crexi Box Plot (compact, centered) ----------
-    fig_noi = section_boxplot_noi(crexi)
-    if fig_noi is not None:
-        _, mid, _ = st.columns([1,2,1])
-        with mid:
-            st.pyplot(fig_noi, use_container_width=False)
+            st.pyplot(fig, use_container_width=False)
 
     # ---------- Location Data (Selected Comparisons vs Crexi) ----------
     st.subheader("Location Data (Selected Comparisons vs Crexi)")
     loc_df_raw = build_location_df(om, crexi)
     st.dataframe(style_location_df(loc_df_raw), use_container_width=True, hide_index=True)
 
-    # ---------- CSV Export ----------
-    st.subheader("Download Comparison CSV")
-    export_df = build_export_rows(om, crexi, realtor)
-    pretty_export = format_export_df(export_df)
-    csv_bytes = pretty_export.to_csv(index=False).encode("utf-8")
-    st.download_button("Download CSV (OM, Crexi, Realtor, Recommended)",
-                       data=csv_bytes, file_name="compare_export.csv", mime="text/csv")
+    # ---------- Financials ----------
+    st.subheader("Financials")
+    fin_df = build_financials_table(om, crexi)
+    st.dataframe(style_financials_df(fin_df), use_container_width=True, hide_index=True)
+
+    # ---------- All Metrics Rollup ----------
+    st.subheader("All Metrics (OM, Crexi, Realtor)")
+    all_df = build_all_metrics_table(om, crexi, realtor)
+    st.dataframe(all_df, use_container_width=True, hide_index=True)
 
 else:
     st.info("Drag & drop an OM **PDF** (optional), set a query, then click **Run Demo**.")
