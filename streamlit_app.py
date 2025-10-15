@@ -50,7 +50,7 @@ def fetch_crexi(query: str, mock: Optional[Dict[str, Any]] = None) -> Dict[str, 
         "avg_sqft_per_type": 910, "lot_size": 1.7, "year_built_or_renov": 1999,
         "rentable_sqft": 107200, "oz_status": "No", "total_units": 120,
         "noi": 1825000, "cap_rate": 0.056, "asking_price": 33000000, "expense_ratio": 0.40,
-        # we still include rents here for the value columns, but *rents' market avg* uses Realtor only
+        # present for value columns; rents' market avg still uses Realtor-only
         "avg_rent_1bd": 1545, "avg_rent_2bd": 1970, "avg_rent_3bd": 2280, "avg_rent_4bd": 2580,
     }
 
@@ -120,13 +120,14 @@ def pct_dev(value: Optional[float], avg: Optional[float]) -> Optional[float]:
 
 def threshold_pct(rule: Dict[str, Any], avg: Optional[float]) -> float:
     """Convert tolerance to a percentage threshold around the market average."""
-    if avg is None or not isinstance(avg, (int, float)) or avg == 0:
-        # fallback threshold if avg is missing/zero
-        return 0.05
-    if "tol_rel" in rule:
-        return float(rule["tol_rel"])
-    if "tol_abs" in rule:
-        return abs(float(rule["tol_abs"])) / abs(float(avg))
+    if not isinstance(avg, (int, float)) or avg == 0:
+        return 0.05  # fallback
+    tol_rel = rule.get("tol_rel", None)
+    if isinstance(tol_rel, (int, float)):
+        return float(tol_rel)
+    tol_abs = rule.get("tol_abs", None)
+    if isinstance(tol_abs, (int, float)):
+        return abs(float(tol_abs)) / abs(float(avg))
     return 0.05
 
 def color_by_dev(dev: Optional[float], thresh: float) -> str:
@@ -190,10 +191,13 @@ def style_table(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
     # Build per-cell color map using original numeric df + thresholds
     def colorize(colname):
         colors = []
-        for i, row in df.iterrows():
+        for _, row in df.iterrows():
             rule = row["_rule"]
+            if rule["type"] != "num":
+                colors.append("")
+                continue
             avg = row["Market Avg"]
-            t = threshold_pct(rule, avg) if rule["type"] == "num" else 0.0
+            t = threshold_pct(rule, avg)
             dev = row[colname]
             colors.append(color_by_dev(dev, t))
         return colors
@@ -206,7 +210,7 @@ def style_table(df: pd.DataFrame) -> "pd.io.formats.style.Styler":
 # UI
 # ======================
 st.title("🏗️ CRE Benchmarking Demo (Puppet)")
-st.caption("Shows percent deviation from the calculated market average (rents use Realtor-only; others combine Crexi+Realtor). Cells color-coded vs tolerance.")
+st.caption("Shows percent deviation from the calculated market average (rents: Realtor-only; others: Crexi+Realtor). Cells color-coded vs tolerance.")
 
 with st.sidebar:
     st.header("Controls")
@@ -215,16 +219,20 @@ with st.sidebar:
     st.markdown("**Tip:** No upload? We’ll use a built-in sample OM.")
     st.divider()
     st.subheader("Adjust tolerances")
-    # live tuning
+    # live tuning — avoid writing tol_rel=None into rules
     for i, (key, rule) in enumerate(METRICS):
         if rule["type"] == "num":
             if "tol_abs" in rule:
-                new_val = st.number_input(f"{rule['label']} tol_abs", value=float(rule["tol_abs"]),
-                                          step=1.0, key=f"tol_abs_{key}")
-                METRICS[i] = (key, {**rule, "tol_abs": new_val, "tol_rel": rule.get("tol_rel")})
+                new_val = st.number_input(f"{rule['label']} tol_abs",
+                                          value=float(rule["tol_abs"]), step=1.0, key=f"tol_abs_{key}")
+                new_rule = {**rule, "tol_abs": new_val}
+                if new_rule.get("tol_rel", None) is None:
+                    new_rule.pop("tol_rel", None)
+                METRICS[i] = (key, new_rule)
+
             elif "tol_rel" in rule:
-                new_val = st.number_input(f"{rule['label']} tol_rel", value=float(rule["tol_rel"]),
-                                          step=0.005, format="%.3f", key=f"tol_rel_{key}")
+                new_val = st.number_input(f"{rule['label']} tol_rel",
+                                          value=float(rule["tol_rel"]), step=0.005, format="%.3f", key=f"tol_rel_{key}")
                 METRICS[i] = (key, {**rule, "tol_rel": new_val})
     run = st.button("Run Demo")
 
@@ -234,7 +242,7 @@ with st.expander("What this puppet does"):
         - **Rents** → average of **Realtor only**.
         - **All other metrics** → average of **Crexi + Realtor** (available values).
     - Displays **percent deviation** from that average for **OM, Crexi, Realtor**.
-    - **Color codes** deviations relative to the metric's tolerance:
+    - **Color codes** deviations relative to tolerance:
         - Green: within tolerance
         - Amber: within 2× tolerance
         - Red: beyond 2× tolerance
@@ -267,10 +275,10 @@ if run:
             total += 1
             if abs(dev) <= t:
                 om_within += 1
-    col1, col2 = st.columns(2)
-    with col1:
+    c1, c2 = st.columns(2)
+    with c1:
         st.metric("Numeric Metrics Evaluated", total)
-    with col2:
+    with c2:
         st.metric("OM within tolerance", f"{om_within}/{total}")
 else:
     st.info("Upload an OM (optional), set a query, tweak tolerances, then click **Run Demo**.")
