@@ -1,5 +1,8 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
+import math
+import matplotlib.pyplot as plt
 from typing import Dict, Any, Optional
 
 st.set_page_config(page_title="CRE Scraping Demo (Puppet)", layout="wide")
@@ -24,7 +27,6 @@ def parse_om(uploaded_file) -> Dict[str, Any]:
     if uploaded_file is not None:
         try:
             df = pd.read_csv(uploaded_file)
-            # Expect columns: metric, value
             kv = {}
             for _, row in df.iterrows():
                 kv[str(row["metric"]).strip()] = try_float(row["value"])
@@ -45,7 +47,6 @@ def parse_om(uploaded_file) -> Dict[str, Any]:
 def fetch_crexi(query: str, mock: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if mock is not None:
         return mock
-    # Simulated based on query to keep it deterministic for a demo
     return {
         "address": query or "123 Main St, Tampa, FL",
         "units_total": 120,
@@ -127,11 +128,68 @@ def color_match(val):
         return "background-color: #ffcdd2"  # red-ish
     return ""
 
+# ---- PDF helpers (Normal curves) ----
+def _std_from_rule(rule: Dict[str, Any], value: Optional[float]) -> Optional[float]:
+    if value is None or not isinstance(value, (int, float)):
+        return None
+    if "tol_abs" in rule:
+        sigma = float(rule["tol_abs"])
+        return max(sigma, 1e-9)
+    if "tol_rel" in rule:
+        sigma = abs(float(value)) * float(rule["tol_rel"])
+        return max(sigma, 1e-9)
+    return None
+
+def _normal_pdf(x: np.ndarray, mu: float, sigma: float) -> np.ndarray:
+    coef = 1.0 / (sigma * math.sqrt(2 * math.pi))
+    return coef * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+
+def plot_metric_pdfs(metric: str, rule: Dict[str, Any], om_v, cx_v, rl_v):
+    # Only for numeric metrics with at least one numeric value
+    if rule.get("type") != "num":
+        return None
+
+    values = []
+    labels = []
+    sigmas = []
+
+    for label, v in [("OM", om_v), ("Crexi", cx_v), ("Realtor", rl_v)]:
+        if isinstance(v, (int, float)):
+            s = _std_from_rule(rule, v)
+            if s is not None and s > 0:
+                values.append(float(v))
+                labels.append(label)
+                sigmas.append(float(s))
+
+    if not values:
+        return None
+
+    # x-range spans 3σ around min/max of means
+    min_mu, max_mu = min(values), max(values)
+    max_sigma = max(sigmas) if sigmas else 1.0
+    x_min = min_mu - 3 * max_sigma
+    x_max = max_mu + 3 * max_sigma
+    if x_min == x_max:
+        x_min -= 1.0
+        x_max += 1.0
+    x = np.linspace(x_min, x_max, 600)
+
+    fig = plt.figure()
+    for mu, sigma, label in zip(values, sigmas, labels):
+        y = _normal_pdf(x, mu, sigma)
+        plt.plot(x, y, label=f"{label} (μ={mu:.4g}, σ={sigma:.4g})")
+    plt.title(f"{metric}: Normal Curves (σ from tolerance)")
+    plt.xlabel(metric)
+    plt.ylabel("PDF")
+    plt.legend()
+    plt.tight_layout()
+    return fig
+
 # -----------------------
 # UI
 # -----------------------
 st.title("🏗️ CRE Benchmarking Demo (Puppet)")
-st.caption("Upload an OM CSV (optional), type a query, and see OM / Crexi / Realtor compared with tolerance flags.")
+st.caption("Upload an OM CSV (optional), type a query, and see OM / Crexi / Realtor compared with tolerance flags + bell curves.")
 
 with st.sidebar:
     st.header("Controls")
@@ -150,11 +208,16 @@ with st.sidebar:
                 METRICS[i] = (metric, {"type": "num", "tol_rel": new_val})
     run = st.button("Run Demo")
 
-with st.expander("What this Demo does"):
+with st.expander("What this puppet does"):
     st.write("""
+    - **Mocks** the scrapers and OM parser (no external calls).
     - Builds a **3-column** table: OM / Crexi / Realtor.
     - Adds **comparison flags** for OM≈Crexi and OM≈Realtor using tolerances.
-    - Lets you **tune tolerances** live.
+    - Shows **normal distribution curves** per numeric metric:
+        - mean = each source value (OM / Crexi / Realtor)
+        - std  = tolerance (abs or relative × value)
+    - Tune tolerances live to see curves tighten/loosen.
+    - Drop-in shell: replace `parse_om`, `fetch_crexi`, `fetch_realtor` with real code later.
     """)
 
 if run:
@@ -179,8 +242,17 @@ if run:
     with col3:
         st.metric("OM≈Realtor (count)", int((df["OM≈Realtor"] == True).sum()))
 
-    csv = df.to_csv(index=False).encode("utf-8")
-    st.download_button("Download results as CSV", data=csv, file_name="compare_results.csv", mime="text/csv")
+    st.markdown("### Distribution Curves")
+    # Render one chart per numeric metric
+    for metric, rule in METRICS:
+        if rule.get("type") != "num":
+            continue
+        om_v = om.get(metric)
+        cx_v = crexi.get(metric)
+        rl_v = realtor.get(metric)
+        fig = plot_metric_pdfs(metric, rule, om_v, cx_v, rl_v)
+        if fig is not None:
+            st.pyplot(fig)
 else:
     st.info("Set a query, (optionally) upload an OM CSV, tweak tolerances, then click **Run Demo** in the sidebar.")
 
