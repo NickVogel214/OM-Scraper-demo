@@ -150,13 +150,11 @@ with st.sidebar:
                 METRICS[i] = (metric, {"type": "num", "tol_rel": new_val})
     run = st.button("Run Demo")
 
-with st.expander("What this puppet does"):
+with st.expander("What this Demo does"):
     st.write("""
-    - **Mocks** the scrapers and OM parser (no external calls).
     - Builds a **3-column** table: OM / Crexi / Realtor.
     - Adds **comparison flags** for OM≈Crexi and OM≈Realtor using tolerances.
     - Lets you **tune tolerances** live.
-    - Drop-in shell: replace `parse_om`, `fetch_crexi`, `fetch_realtor` with real code later.
     """)
 
 if run:
