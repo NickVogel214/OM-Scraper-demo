@@ -128,7 +128,7 @@ def color_match(val):
         return "background-color: #ffcdd2"  # red-ish
     return ""
 
-# ---- Box-plot helpers ----
+# ---- Box-plot helpers (no OM box; OM shown as a line) ----
 def _std_from_rule(rule: Dict[str, Any], value: Optional[float]) -> Optional[float]:
     if value is None or not isinstance(value, (int, float)):
         return None
@@ -141,19 +141,24 @@ def _std_from_rule(rule: Dict[str, Any], value: Optional[float]) -> Optional[flo
     return None
 
 def _synthetic_samples(mu: float, sigma: float, n: int = 400) -> np.ndarray:
-    # Clamp sigma to avoid degenerate boxes
     sigma = max(sigma, 1e-9)
+    # "Normalize the artificial data" in the sense that both sources are generated
+    # from N(mu, sigma^2) using the same n and algorithm, so spreads are comparable.
     return np.random.normal(loc=mu, scale=sigma, size=n)
 
-def make_boxplot(metric: str, rule: Dict[str, Any], om_v, cx_v, rl_v):
-    """Return a matplotlib Figure with a single boxplot comparing OM/Crexi/Realtor."""
+def make_market_boxplot(metric: str, rule: Dict[str, Any], om_v, cx_v, rl_v):
+    """
+    Build a box plot from Realtor/Crexi only (if present).
+    Overlay a horizontal line showing where the OM value lies.
+    """
     if rule.get("type") != "num":
         return None
 
     data: List[np.ndarray] = []
     labels: List[str] = []
 
-    for label, v in [("OM", om_v), ("Crexi", cx_v), ("Realtor", rl_v)]:
+    # Only market sources: Crexi, Realtor
+    for label, v in [("Crexi", cx_v), ("Realtor", rl_v)]:
         if isinstance(v, (int, float)):
             s = _std_from_rule(rule, v)
             if s is not None:
@@ -165,8 +170,17 @@ def make_boxplot(metric: str, rule: Dict[str, Any], om_v, cx_v, rl_v):
 
     fig = plt.figure()
     plt.boxplot(data, labels=labels, showmeans=True)
-    plt.title(f"{metric} — Box Plot (synthetic via tolerances)")
-    plt.xlabel("Source")
+
+    # OM overlay (no box)
+    if isinstance(om_v, (int, float)):
+        y = float(om_v)
+        # horizontal line across the plot at y = OM value
+        plt.axhline(y=y, linestyle="--", linewidth=1.5)
+        # annotate on the right edge
+        plt.text(len(labels) + 0.5, y, f"  OM = {y:.4g}", va="center")
+
+    plt.title(f"{metric} — Market Box Plot (Crexi/Realtor); OM shown as dashed line")
+    plt.xlabel("Market Source")
     plt.ylabel(metric)
     plt.tight_layout()
     return fig
@@ -175,7 +189,7 @@ def make_boxplot(metric: str, rule: Dict[str, Any], om_v, cx_v, rl_v):
 # UI
 # -----------------------
 st.title("🏗️ CRE Benchmarking Demo (Puppet)")
-st.caption("Upload an OM CSV (optional), type a query, and see OM / Crexi / Realtor compared with tolerance flags + box plots.")
+st.caption("OM / Crexi / Realtor compare with tolerance flags. Box plots use ONLY market sources; OM is overlaid as a line.")
 
 with st.sidebar:
     st.header("Controls")
@@ -198,10 +212,10 @@ with st.expander("What this puppet does"):
     st.write("""
     - **Mocks** the scrapers and OM parser (no external calls).
     - Builds a **3-column** table: OM / Crexi / Realtor + two match flags.
-    - Shows **box plots** (right side) per numeric metric:
-        - Each box is a **synthetic distribution** centered on a source's value.
-        - Spread is derived from the metric's **tolerance** (abs or relative × value).
-    - Tune tolerances live to see distributions tighten/loosen.
+    - Shows **box plots** using **market sources only (Crexi/Realtor)**.
+      The **OM** value is shown as a **dashed horizontal line** across the box plot.
+    - If only one market source is available for a metric, the box plot shows **just that source**.
+    - Tune tolerances live; spreads come from tolerance rules (abs or relative × value).
     - Drop-in shell: replace `parse_om`, `fetch_crexi`, `fetch_realtor` with real code later.
     """)
 
@@ -234,11 +248,11 @@ if run:
         st.download_button("Download results as CSV", data=csv, file_name="compare_results.csv", mime="text/csv")
 
     with right:
-        st.subheader("Box Plots (near table)")
+        st.subheader("Box Plots (market only; OM overlay)")
         for metric, rule in METRICS:
             if rule.get("type") != "num":
                 continue
-            fig = make_boxplot(metric, rule, om.get(metric), crexi.get(metric), realtor.get(metric))
+            fig = make_market_boxplot(metric, rule, om.get(metric), crexi.get(metric), realtor.get(metric))
             if fig is not None:
                 st.pyplot(fig)
 else:
@@ -246,3 +260,4 @@ else:
 
 st.markdown("---")
 st.caption("Puppet build for demo purposes. Swap the backends with real scrapers for production.")
+
